@@ -1,0 +1,428 @@
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env'), override: true });
+const express = require('express');
+// Importamos também o clearHistory para limpar memória quando der !pare ou !volte
+const { getGroqResponse, clearHistory } = require('./services/ai'); 
+const { sendMessage } = require('./services/wapi');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+const conversasPausadas = new Set();
+const ultimosEnviosBot = new Map();
+const mensagensBotIds = new Map();
+const lidToPhone = new Map();
+const BOT_ECHO_WINDOW_MS = 15000;
+const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
+const NUMERO_ADMIN = "5516993804499"; 
+const PAUSA_AUTOMATICA_ADMIN_ONLY = String(process.env.PAUSA_AUTOMATICA_ADMIN_ONLY || "").toLowerCase() === "true";
+const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "").toLowerCase() === "true";
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.get('/', (req, res) => res.send('🤖 Bot com Memória ON!'));
+app.get('/healthz', (req, res) => res.status(200).send('ok'));
+
+function toDigits(value) {
+    return String(value || "").replace(/\D/g, "");
+}
+
+function extractId(value) {
+    if (!value) return "";
+    if (typeof value === "string" || typeof value === "number") return String(value);
+    if (typeof value === "object") {
+        return (
+            value.id ||
+            value.user ||
+            value.phone ||
+            value.jid ||
+            value.remoteJid ||
+            value.chatId ||
+            value._serialized ||
+            ""
+        );
+    }
+    return "";
+}
+
+function pickFirstId(...values) {
+    for (const v of values) {
+        const id = extractId(v);
+        if (id) return id;
+    }
+    return "";
+}
+
+function pickFirstString(...values) {
+    for (const v of values) {
+        if (typeof v === "string" && v.trim()) return v;
+    }
+    return "";
+}
+
+function getEventType(body) {
+    if (!body || typeof body !== "object") return "";
+    return pickFirstString(
+        body.event,
+        body.type,
+        body.eventType,
+        body.action,
+        body.data?.event,
+        body.data?.type,
+        body.data?.eventType,
+        body.data?.action
+    );
+}
+
+function getPayloadData(body) {
+    if (!body || typeof body !== "object") return {};
+    const data = body.data && typeof body.data === "object" ? body.data : body;
+    if (data?.messages && Array.isArray(data.messages) && data.messages.length) {
+        return data.messages[0];
+    }
+    if (data?.message && (data.message.key || data.message.message)) {
+        return data.message;
+    }
+    return data;
+}
+
+function getMessageText(body) {
+    const data = getPayloadData(body);
+    const msg = data.message || data.msgContent || body.msgContent || data;
+    return pickFirstString(
+        msg?.conversation,
+        msg?.extendedTextMessage?.text,
+        msg?.text,
+        msg?.caption,
+        msg?.imageMessage?.caption,
+        msg?.videoMessage?.caption,
+        msg?.documentMessage?.caption,
+        msg?.message?.conversation,
+        msg?.message?.extendedTextMessage?.text,
+        msg?.message?.text,
+        body?.body,
+        body?.text,
+        body?.message
+    );
+}
+
+function truthyFlag(value) {
+    if (value === true || value === 1 || value === "1") return true;
+    if (typeof value === "string") return value.toLowerCase() === "true";
+    return false;
+}
+
+function normalizeChatId(value) {
+    const raw = String(value || "");
+    const base = raw.split(":")[0];
+    const digits = toDigits(base);
+    return { raw, base, digits };
+}
+
+function normalizeLid(value) {
+    const raw = String(value || "");
+    const base = raw.split(":")[0];
+    return base.endsWith("@lid") ? base : "";
+}
+
+function rememberLidMapping(lid, phone) {
+    const lidBase = normalizeLid(lid);
+    const phoneDigits = toDigits(phone);
+    if (lidBase && phoneDigits) {
+        lidToPhone.set(lidBase, phoneDigits);
+    }
+}
+
+function resolveLidToPhone(value) {
+    const lidBase = normalizeLid(value);
+    if (!lidBase) return "";
+    return lidToPhone.get(lidBase) || "";
+}
+
+function pauseChat(chatId) {
+    if (!chatId) return;
+    const { raw, base, digits } = normalizeChatId(chatId);
+    if (digits) {
+        conversasPausadas.add(digits);
+        conversasPausadas.add(digits + "@c.us");
+        conversasPausadas.add(digits + "@s.whatsapp.net");
+    }
+    if (raw) conversasPausadas.add(raw);
+    if (base) conversasPausadas.add(base);
+}
+
+function cleanupMensagemBotIds() {
+    const now = Date.now();
+    for (const [id, ts] of mensagensBotIds.entries()) {
+        if (now - ts > BOT_MSG_ID_TTL_MS) mensagensBotIds.delete(id);
+    }
+}
+
+function registrarMensagemBotId(id) {
+    if (!id) return;
+    mensagensBotIds.set(String(id), Date.now());
+    cleanupMensagemBotIds();
+}
+
+function isMensagemBotId(id) {
+    if (!id) return false;
+    cleanupMensagemBotIds();
+    return mensagensBotIds.has(String(id));
+}
+
+function registrarEnvioBot(chaveChat, texto) {
+    if (!chaveChat || !texto) return;
+    ultimosEnviosBot.set(chaveChat, { texto: texto.trim(), ts: Date.now() });
+}
+
+function ehEcoDoBot(chaveChat, texto) {
+    if (!chaveChat || !texto) return false;
+    const info = ultimosEnviosBot.get(chaveChat);
+    if (!info) return false;
+    const dentroJanela = Date.now() - info.ts <= BOT_ECHO_WINDOW_MS;
+    const mesmoTexto = info.texto === texto.trim();
+    if (dentroJanela && mesmoTexto) {
+        ultimosEnviosBot.delete(chaveChat);
+        return true;
+    }
+    return false;
+}
+
+
+app.post('/webhook', async (req, res) => {
+    try {
+        const body = req.body || {};
+        const data = getPayloadData(body);
+        if (DEBUG_WEBHOOK) {
+            try {
+                const raw = JSON.stringify(body, null, 2);
+                const truncated = raw.length > 8000 ? raw.slice(0, 8000) + "\n...<truncated>" : raw;
+                console.log("🧾 WEBHOOK RAW:", truncated);
+            } catch (e) {
+                console.log("🧾 WEBHOOK RAW: <erro ao serializar>");
+            }
+        }
+
+        const eventType = getEventType(body);
+        const eventUpper = String(eventType || "").toUpperCase();
+        if (eventUpper === "WEBHOOKSTATUS") {
+            const statusFromMe = truthyFlag(body.fromMe);
+            if (statusFromMe) {
+                const statusChatId = pickFirstId(
+                    body.chat?.id,
+                    body.chatId,
+                    body.key?.remoteJid,
+                    body.to,
+                    body.from,
+                    body.phone
+                );
+                const mappedPhone = resolveLidToPhone(statusChatId);
+                const statusMessageId = body.messageId || body.id || body.data?.messageId || body.data?.id;
+                const knownBot = isMensagemBotId(statusMessageId);
+                if (DEBUG_WEBHOOK) {
+                    console.log("🧾 STATUS META:", {
+                        statusMessageId,
+                        statusChatId,
+                        mappedPhone,
+                        knownBot,
+                        hasKnownBotIds: mensagensBotIds.size > 0
+                    });
+                }
+                if (statusMessageId && !knownBot) {
+                    const pauseTarget = mappedPhone || statusChatId;
+                    pauseChat(pauseTarget);
+                    const statusDigits = normalizeChatId(pauseTarget).digits;
+                    if (statusDigits) clearHistory(statusDigits);
+                    console.log(`PAUSA AUTOMATICA (STATUS fromMe): ${statusDigits || pauseTarget}`);
+                }
+            }
+            return res.status(200).send('Status');
+        }
+
+        const senderRaw = pickFirstId(
+            data.key?.participant,
+            data.key?.remoteJid,
+            data.remoteJid,
+            data.participant,
+            data.sender?.id,
+            data.sender?.phone,
+            body.sender?.id,
+            body.sender?.phone,
+            body.sender,
+            body.author,
+            body.participant,
+            body.from,
+            body.key?.participant
+        );
+        const sender = toDigits(senderRaw);
+        const fromMe =
+            truthyFlag(body.fromMe) ||
+            truthyFlag(body.key?.fromMe) ||
+            truthyFlag(body.data?.fromMe) ||
+            truthyFlag(data.fromMe) ||
+            truthyFlag(data.key?.fromMe) ||
+            truthyFlag(body.sender?.fromMe) ||
+            truthyFlag(body.sender?.isMe) ||
+            truthyFlag(body.sender?.isOwner);
+        const adminMatch =
+            sender.includes(NUMERO_ADMIN) ||
+            toDigits(extractId(body.author)).includes(NUMERO_ADMIN) ||
+            toDigits(extractId(body.participant)).includes(NUMERO_ADMIN) ||
+            toDigits(extractId(body.key?.participant)).includes(NUMERO_ADMIN);
+
+        const chatIdDefault = pickFirstId(
+            data.key?.remoteJid,
+            data.remoteJid,
+            data.chatId,
+            body.chat?.id,
+            body.chatId,
+            body.phone,
+            body.from,
+            body.to,
+            body.key?.remoteJid
+        );
+        const chatId = (fromMe || adminMatch)
+            ? pickFirstId(
+                body.to,
+                body.phone,
+                data.key?.remoteJid,
+                body.chat?.id,
+                body.chatId,
+                body.key?.remoteJid,
+                body.from,
+                chatIdDefault
+            )
+            : chatIdDefault;
+        const messageText = getMessageText(body);
+
+        if (!chatId || !messageText) return res.status(200).send('Ignorado');
+
+        const texto = messageText.trim();
+        const comando = texto.toLowerCase().split(" ")[0];
+        const chatLimpo = toDigits(chatId); // ID limpo para usar na memória
+        rememberLidMapping(body.sender?.senderLid, senderRaw);
+        rememberLidMapping(body.sender?.senderLid, chatId);
+        rememberLidMapping(body.chat?.id, chatId);
+        rememberLidMapping(data.key?.remoteJid, chatId);
+        if (DEBUG_WEBHOOK) {
+            console.log("🧾 WEBHOOK META:", {
+                fromMe,
+                adminMatch,
+                senderRaw,
+                sender,
+                chatId,
+                chatIdDefault,
+                to: extractId(body.to),
+                phone: extractId(body.phone),
+                from: extractId(body.from),
+                author: extractId(body.author),
+                participant: extractId(body.participant),
+                remoteJid: extractId(body.key?.remoteJid),
+                hasMessage: Boolean(messageText)
+            });
+        }
+        if (fromMe || adminMatch) {
+            console.log("🧭 ASSUMIU? META:", {
+                fromMe,
+                adminMatch,
+                senderRaw,
+                sender,
+                chatId,
+                chatIdDefault,
+                to: extractId(body.to),
+                phone: extractId(body.phone),
+                from: extractId(body.from),
+                author: extractId(body.author),
+                participant: extractId(body.participant),
+                remoteJid: extractId(body.key?.remoteJid)
+            });
+        }
+
+        // --- ZONA DE COMANDO (Admin) ---
+        if (adminMatch) {
+            if (comando === '!silencio' || comando === '!pare') {
+                const alvo = texto.split(" ")[1]; 
+                if (alvo) {
+                    const alvoLimpo = alvo.replace(/\D/g, "");
+                    conversasPausadas.add(alvoLimpo); 
+                    conversasPausadas.add(alvoLimpo + "@c.us");
+                    conversasPausadas.add(alvoLimpo + "@s.whatsapp.net");
+                    
+                    // Limpa a memória da IA para quando voltar, voltar "zerado" ou manter, você decide.
+                    // clearHistory(alvoLimpo); 
+                    
+                    console.log(`🛑 ADMIN PAUSOU: ${alvoLimpo}`);
+                    await sendMessage(chatId, `🛑 Bot pausado para ${alvoLimpo}.`);
+                }
+                return res.status(200).send('Admin');
+            }
+
+            if (comando === '!volte') {
+                const alvo = texto.split(" ")[1];
+                if (alvo) {
+                    const alvoLimpo = alvo.replace(/\D/g, "");
+                    conversasPausadas.delete(alvoLimpo);
+                    conversasPausadas.delete(alvoLimpo + "@c.us");
+                    conversasPausadas.delete(alvoLimpo + "@s.whatsapp.net");
+                    
+                    // Limpa memória para começar conversa nova limpa
+                    clearHistory(alvoLimpo); 
+
+                    console.log(`🟢 ADMIN REATIVOU: ${alvoLimpo}`);
+                    await sendMessage(chatId, `🟢 Bot reativado para ${alvoLimpo}.`);
+                }
+                return res.status(200).send('Admin');
+            }
+        }
+
+        // --- ZONA DE PAUSA ---
+        if (conversasPausadas.has(chatLimpo) || conversasPausadas.has(chatId)) {
+            return res.status(200).send('Pausado');
+        }
+
+        if (fromMe || adminMatch) {
+            const ecoBot = ehEcoDoBot(chatLimpo, messageText) || ehEcoDoBot(chatId, messageText);
+            if (ecoBot) {
+                return res.status(200).send('Ignorado (eco bot)');
+            }
+
+            if (!PAUSA_AUTOMATICA_ADMIN_ONLY || adminMatch) {
+                pauseChat(chatId);
+                clearHistory(chatLimpo);
+                console.log(`PAUSA AUTOMATICA (ASSUMIDO): ${chatLimpo}`);
+                return res.status(200).send('Pausado (assumido)');
+            }
+        }
+
+        // --- ZONA DA IA (AGORA COM MEMÓRIA) ---
+        console.log(`✅ Cliente ${chatLimpo} disse: "${messageText}"`);
+
+        // MUDANÇA AQUI: Passamos o chatLimpo (ID do cliente) para a memória funcionar
+        const aiResponse = await getGroqResponse(messageText, chatLimpo);
+        
+        console.log(`🧠 IA: ${aiResponse}`);
+        registrarEnvioBot(chatLimpo, aiResponse);
+        registrarEnvioBot(chatId, aiResponse);
+        const sendResult = await sendMessage(chatId, aiResponse);
+        const sentMessageId =
+            sendResult?.key?.id ||
+            sendResult?.data?.key?.id ||
+            sendResult?.messageId ||
+            sendResult?.id ||
+            sendResult?.data?.messageId ||
+            sendResult?.data?.id;
+        registrarMensagemBotId(sentMessageId);
+
+        res.status(200).send('OK');
+
+    } catch (error) {
+        console.error('❌ Erro:', error);
+        res.status(200).send('Erro');
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`🚀 Servidor rodando na porta ${PORT}`);
+    console.log(`🧠 Memória ativada para conversas contínuas.`);
+});

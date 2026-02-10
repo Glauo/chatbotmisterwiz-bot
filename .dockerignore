@@ -1,0 +1,7 @@
+.git
+node_modules
+npm-debug.log
+.env
+DietHealth_Restaurado
+ngrok.exe
+node-v20.19.6-x64 (1).msi
