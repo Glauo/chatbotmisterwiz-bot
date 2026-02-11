@@ -283,7 +283,9 @@ app.post('/webhook', async (req, res) => {
             body.to,
             body.key?.remoteJid
         );
-        const chatId = (fromMe || adminMatch)
+        // For inbound messages, reply to the sender chat.
+        // For messages sent by this number (fromMe), use "to/phone" as destination.
+        const chatId = fromMe
             ? pickFirstId(
                 body.to,
                 body.phone,
@@ -294,7 +296,13 @@ app.post('/webhook', async (req, res) => {
                 body.from,
                 chatIdDefault
             )
-            : chatIdDefault;
+            : pickFirstId(
+                chatIdDefault,
+                body.from,
+                data.key?.participant,
+                body.participant,
+                senderRaw
+            );
         const messageText = getMessageText(body);
 
         if (!chatId || !messageText) {
