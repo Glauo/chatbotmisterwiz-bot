@@ -322,7 +322,7 @@ app.post('/webhook', async (req, res) => {
                 hasMessage: Boolean(messageText)
             });
         }
-        if (fromMe || adminMatch) {
+        if (fromMe) {
             console.log("🧭 ASSUMIU? META:", {
                 fromMe,
                 adminMatch,
@@ -381,13 +381,13 @@ app.post('/webhook', async (req, res) => {
             return res.status(200).send('Pausado');
         }
 
-        if (fromMe || adminMatch) {
+        if (fromMe) {
             const ecoBot = ehEcoDoBot(chatLimpo, messageText) || ehEcoDoBot(chatId, messageText);
             if (ecoBot) {
                 return res.status(200).send('Ignorado (eco bot)');
             }
 
-            if (!PAUSA_AUTOMATICA_ADMIN_ONLY || adminMatch) {
+            if (!PAUSA_AUTOMATICA_ADMIN_ONLY) {
                 pauseChat(chatId);
                 clearHistory(chatLimpo);
                 console.log(`PAUSA AUTOMATICA (ASSUMIDO): ${chatLimpo}`);
