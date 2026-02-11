@@ -206,6 +206,7 @@ app.post('/webhook', async (req, res) => {
 
         const eventType = getEventType(body);
         const eventUpper = String(eventType || "").toUpperCase();
+        console.log(`[WEBHOOK] event=${eventUpper || 'UNKNOWN'}`);
         if (eventUpper === "WEBHOOKSTATUS") {
             const statusFromMe = truthyFlag(body.fromMe);
             if (statusFromMe) {
@@ -296,7 +297,14 @@ app.post('/webhook', async (req, res) => {
             : chatIdDefault;
         const messageText = getMessageText(body);
 
-        if (!chatId || !messageText) return res.status(200).send('Ignorado');
+        if (!chatId || !messageText) {
+            console.log('[WEBHOOK] ignored (missing chatId/text)', {
+                event: eventUpper || 'UNKNOWN',
+                chatId,
+                hasText: Boolean(messageText)
+            });
+            return res.status(200).send('Ignorado');
+        }
 
         const texto = messageText.trim();
         const comando = texto.toLowerCase().split(" ")[0];
