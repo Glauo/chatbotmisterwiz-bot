@@ -23,6 +23,8 @@ services:
       - "8080:8080"
     env_file:
       - evolution.env
+    environment:
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
     volumes:
       - evolution_instances:/evolution/instances
     depends_on:
