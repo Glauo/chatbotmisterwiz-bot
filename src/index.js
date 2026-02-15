@@ -12,6 +12,8 @@ const conversasPausadas = new Set();
 const ultimosEnviosBot = new Map();
 const mensagensBotIds = new Map();
 const lidToPhone = new Map();
+const processedMessageIds = new Map(); // Deduplicação por message ID
+const DEDUP_TTL_MS = 60 * 1000; // 60 segundos de janela de deduplicação
 const BOT_ECHO_WINDOW_MS = 15000;
 const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 const NUMERO_ADMIN = "5516993804499"; 
@@ -207,6 +209,21 @@ app.post('/webhook', async (req, res) => {
         const eventType = getEventType(body);
         const eventUpper = String(eventType || "").toUpperCase();
         console.log(`[WEBHOOK] event=${eventUpper || 'UNKNOWN'}`);
+
+        // === DEDUPLICAÇÃO POR MESSAGE ID ===
+        const messageId = data?.key?.id || data?.id || body?.key?.id || body?.id || body?.data?.key?.id;
+        if (messageId) {
+            const now = Date.now();
+            // Limpar IDs antigos
+            for (const [id, ts] of processedMessageIds.entries()) {
+                if (now - ts > DEDUP_TTL_MS) processedMessageIds.delete(id);
+            }
+            if (processedMessageIds.has(messageId)) {
+                console.log(`[DEDUP] Mensagem duplicada ignorada: ${messageId}`);
+                return res.status(200).send('Duplicada');
+            }
+            processedMessageIds.set(messageId, now);
+        }
         if (eventUpper === "WEBHOOKSTATUS") {
             const statusFromMe = truthyFlag(body.fromMe);
             if (statusFromMe) {
