@@ -64,8 +64,12 @@ async function sendMessage(phone, message) {
             return;
         }
 
+        // Evolution API v2.x aceita tanto "number" quanto "number@s.whatsapp.net"
+        // Vamos garantir o formato correto
+        const formattedNumber = number.includes('@') ? number : `${number}@s.whatsapp.net`;
+        
         const payload = {
-            number,
+            number: formattedNumber,
             text: message
         };
 
