@@ -17,6 +17,13 @@ const DEDUP_TTL_MS = 60 * 1000; // 60 segundos de janela de deduplicação
 const BOT_ECHO_WINDOW_MS = 15000;
 const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 const NUMERO_ADMIN = "5516993804499"; 
+const BOT_SELF_NUMBER = toDigits(
+    process.env.BOT_SELF_NUMBER ||
+    process.env.WHATSAPP_BOT_NUMBER ||
+    process.env.INSTANCE_PHONE ||
+    process.env.OWNER_NUMBER ||
+    ""
+);
 // Safer default: only pause chats manually/admin unless explicitly disabled.
 const PAUSA_AUTOMATICA_ADMIN_ONLY = String(process.env.PAUSA_AUTOMATICA_ADMIN_ONLY || "true").toLowerCase() !== "false";
 // Optional guard for advanced takeover flows; disabled by default.
@@ -162,6 +169,52 @@ function resolveBestPhoneId(...values) {
     return "";
 }
 
+function buildSelfNumberSet(body, data, fromMe) {
+    const set = new Set();
+    if (BOT_SELF_NUMBER) set.add(BOT_SELF_NUMBER);
+    const instanceHints = [
+        body?.instance?.owner,
+        body?.instance?.number,
+        body?.instance?.wuid,
+        body?.me?.id,
+        body?.me?.phone
+    ];
+    for (const hint of instanceHints) {
+        const digits = toDigits(extractId(hint));
+        if (isLikelyPhoneDigits(digits)) set.add(digits);
+    }
+    if (fromMe) {
+        const senderHint = resolveBestPhoneId(
+            body?.sender?.id,
+            body?.sender?.phone,
+            body?.sender,
+            data?.sender?.id,
+            data?.sender?.phone,
+            body?.from
+        );
+        if (senderHint) set.add(senderHint);
+    }
+    return set;
+}
+
+function pickInboundChatId(candidates, selfNumbers) {
+    for (const candidate of candidates) {
+        const id = extractId(candidate);
+        if (!id) continue;
+        if (String(id).includes("@broadcast")) continue;
+
+        const mapped = resolveLidToPhone(id);
+        const chosen = mapped || id;
+        const digits = toDigits(String(chosen).split(":")[0]);
+
+        if (!isLikelyPhoneDigits(digits)) continue;
+        if (selfNumbers.has(digits)) continue;
+
+        return chosen;
+    }
+    return "";
+}
+
 function pauseChat(chatId) {
     if (!chatId) return;
     const { raw, base, digits } = normalizeChatId(chatId);
@@ -279,34 +332,37 @@ app.post('/webhook', async (req, res) => {
         }
 
         const senderRaw = pickFirstId(
-            body.sender?.id,
-            body.sender?.phone,
-            body.sender,
-            body.from,
-            data.sender?.id,
-            data.sender?.phone,
             data.key?.participant,
-            body.participant,
-            body.key?.participant,
             data.key?.remoteJid,
             data.remoteJid,
             data.participant,
-            body.author,
-            body.key?.remoteJid
-        );
-        const senderResolved = resolveBestPhoneId(
+            data.sender?.id,
+            data.sender?.phone,
+            body.from,
+            body.participant,
+            body.key?.participant,
             body.sender?.id,
             body.sender?.phone,
             body.sender,
-            body.from,
-            data.sender?.id,
-            data.sender?.phone,
+            body.author,
+            body.key?.remoteJid,
+            body.phone
+        );
+        const senderResolved = resolveBestPhoneId(
             data.key?.participant,
-            body.participant,
-            body.key?.participant,
             data.key?.remoteJid,
             data.remoteJid,
-            body.key?.remoteJid
+            data.participant,
+            data.sender?.id,
+            data.sender?.phone,
+            body.from,
+            body.participant,
+            body.key?.participant,
+            body.sender?.id,
+            body.sender?.phone,
+            body.sender,
+            body.key?.remoteJid,
+            body.phone
         );
         const sender = senderResolved || toDigits(senderRaw);
         const fromMe =
@@ -318,6 +374,7 @@ app.post('/webhook', async (req, res) => {
             truthyFlag(body.sender?.fromMe) ||
             truthyFlag(body.sender?.isMe) ||
             truthyFlag(body.sender?.isOwner);
+        const selfNumbers = buildSelfNumberSet(body, data, fromMe);
         const adminMatch =
             sender.includes(NUMERO_ADMIN) ||
             toDigits(extractId(body.author)).includes(NUMERO_ADMIN) ||
@@ -325,18 +382,21 @@ app.post('/webhook', async (req, res) => {
             toDigits(extractId(body.key?.participant)).includes(NUMERO_ADMIN);
 
         const chatIdDefault = pickFirstId(
-            body.sender?.id,
-            body.sender?.phone,
-            body.sender,
-            body.from,
             data.key?.remoteJid,
+            body.key?.remoteJid,
             data.remoteJid,
             data.chatId,
             body.chat?.id,
             body.chatId,
+            body.from,
             body.phone,
             body.to,
-            body.key?.remoteJid
+            data.key?.participant,
+            body.participant,
+            body.key?.participant,
+            body.sender?.id,
+            body.sender?.phone,
+            body.sender
         );
         // For inbound messages, reply to the sender chat.
         // For messages sent by this number (fromMe), use "to/phone" as destination.
@@ -351,18 +411,24 @@ app.post('/webhook', async (req, res) => {
                 body.from,
                 chatIdDefault
             )
-            : pickFirstId(
-                body.sender?.id,
-                body.sender?.phone,
-                body.sender,
+            : pickInboundChatId([
                 body.from,
-                chatIdDefault,
+                data.key?.remoteJid,
+                body.key?.remoteJid,
+                data.remoteJid,
+                data.chatId,
+                body.chat?.id,
+                body.chatId,
+                body.phone,
                 data.key?.participant,
                 body.participant,
-                senderRaw
-            );
-        if (!fromMe && senderResolved) {
-            // Prefer explicit sender phone for inbound events to avoid @lid / foreign pseudo IDs.
+                body.key?.participant,
+                senderRaw,
+                body.sender?.id,
+                body.sender?.phone,
+                body.sender
+            ], selfNumbers);
+        if (!fromMe && !chatId && senderResolved && !selfNumbers.has(senderResolved)) {
             chatId = senderResolved;
         } else if (!fromMe) {
             const mappedChat = resolveLidToPhone(chatId);
@@ -382,6 +448,15 @@ app.post('/webhook', async (req, res) => {
         const texto = messageText.trim();
         const comando = texto.toLowerCase().split(" ")[0];
         const chatLimpo = toDigits(chatId); // ID limpo para usar na memÃ³ria
+
+        // Proteção: nunca responder para o próprio número do bot.
+        if (!fromMe && chatLimpo && selfNumbers.has(chatLimpo)) {
+            if (DEBUG_WEBHOOK) {
+                console.log(`[WEBHOOK] ignorado (chat do próprio bot): ${chatLimpo}`);
+            }
+            return res.status(200).send('Ignorado (self)');
+        }
+
         rememberLidMapping(body.sender?.senderLid, senderRaw);
         rememberLidMapping(body.sender?.senderLid, chatId);
         rememberLidMapping(body.chat?.id, chatId);
