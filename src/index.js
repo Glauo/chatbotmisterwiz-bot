@@ -422,7 +422,8 @@ app.post('/webhook', async (req, res) => {
 
             // Pausa automática: quando o admin envia uma mensagem manualmente,
             // o bot para de responder naquele chat até que o admin use !volte
-            if (adminMatch || !PAUSA_AUTOMATICA_ADMIN_ONLY) {
+            // CORREÇÃO: Só pausa se for o admin E a flag estiver ativa
+            if (adminMatch && PAUSA_AUTOMATICA_ADMIN_ONLY) {
                 pauseChat(chatId);
                 clearHistory(chatLimpo);
                 console.log(`🛑 PAUSA AUTOMATICA (ADMIN ASSUMIU): ${chatLimpo}`);
