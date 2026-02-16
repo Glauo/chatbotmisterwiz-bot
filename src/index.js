@@ -163,7 +163,14 @@ function resolveBestPhoneId(...values) {
         if (!id) continue;
         const mapped = resolveLidToPhone(id);
         if (isLikelyPhoneDigits(mapped)) return mapped;
-        const direct = toDigits(id.split(":")[0]);
+        const base = String(id).split(":")[0];
+        // @lid não é número de WhatsApp real (a menos que já esteja mapeado).
+        if (base.endsWith("@lid")) continue;
+        // Se tiver sufixo, aceitar apenas IDs clássicos do WhatsApp.
+        if (base.includes("@") && !base.endsWith("@s.whatsapp.net") && !base.endsWith("@c.us")) {
+            continue;
+        }
+        const direct = toDigits(base);
         if (isLikelyPhoneDigits(direct)) return direct;
     }
     return "";
@@ -201,9 +208,16 @@ function pickInboundChatId(candidates, selfNumbers) {
     for (const candidate of candidates) {
         const id = extractId(candidate);
         if (!id) continue;
-        if (String(id).includes("@broadcast")) continue;
+        const idStr = String(id);
+        if (idStr.includes("@broadcast") || idStr.includes("@g.us")) continue;
 
         const mapped = resolveLidToPhone(id);
+        const base = idStr.split(":")[0];
+        // Não usar @lid sem mapeamento prévio.
+        if (!mapped && base.endsWith("@lid")) continue;
+        // Se tiver sufixo, aceitar apenas IDs clássicos do WhatsApp.
+        if (!mapped && base.includes("@") && !base.endsWith("@s.whatsapp.net") && !base.endsWith("@c.us")) continue;
+
         const chosen = mapped || id;
         const digits = toDigits(String(chosen).split(":")[0]);
 
@@ -332,37 +346,42 @@ app.post('/webhook', async (req, res) => {
         }
 
         const senderRaw = pickFirstId(
+            body.sender?.id,
+            body.sender?.phone,
+            body.sender,
+            body.from,
+            body.phone,
+            body.participant,
+            body.key?.participant,
+            body.key?.remoteJid,
             data.key?.participant,
             data.key?.remoteJid,
             data.remoteJid,
             data.participant,
             data.sender?.id,
             data.sender?.phone,
-            body.from,
-            body.participant,
-            body.key?.participant,
-            body.sender?.id,
-            body.sender?.phone,
-            body.sender,
             body.author,
-            body.key?.remoteJid,
-            body.phone
+            data.chatId,
+            body.chatId
         );
         const senderResolved = resolveBestPhoneId(
+            body.sender?.id,
+            body.sender?.phone,
+            body.sender,
+            body.from,
+            body.phone,
+            body.participant,
+            body.key?.participant,
+            body.key?.remoteJid,
             data.key?.participant,
             data.key?.remoteJid,
             data.remoteJid,
             data.participant,
             data.sender?.id,
             data.sender?.phone,
-            body.from,
-            body.participant,
-            body.key?.participant,
-            body.sender?.id,
-            body.sender?.phone,
-            body.sender,
-            body.key?.remoteJid,
-            body.phone
+            body.author,
+            data.chatId,
+            body.chatId
         );
         const sender = senderResolved || toDigits(senderRaw);
         const fromMe =
@@ -382,21 +401,22 @@ app.post('/webhook', async (req, res) => {
             toDigits(extractId(body.key?.participant)).includes(NUMERO_ADMIN);
 
         const chatIdDefault = pickFirstId(
-            data.key?.remoteJid,
+            body.sender?.id,
+            body.sender?.phone,
+            body.sender,
+            body.from,
+            body.phone,
+            body.participant,
+            body.key?.participant,
             body.key?.remoteJid,
+            data.key?.remoteJid,
             data.remoteJid,
             data.chatId,
             body.chat?.id,
             body.chatId,
-            body.from,
-            body.phone,
             body.to,
             data.key?.participant,
-            body.participant,
-            body.key?.participant,
-            body.sender?.id,
-            body.sender?.phone,
-            body.sender
+            data.participant
         );
         // For inbound messages, reply to the sender chat.
         // For messages sent by this number (fromMe), use "to/phone" as destination.
@@ -412,21 +432,23 @@ app.post('/webhook', async (req, res) => {
                 chatIdDefault
             )
             : pickInboundChatId([
+                body.sender?.id,
+                body.sender?.phone,
+                body.sender,
                 body.from,
-                data.key?.remoteJid,
+                body.phone,
+                body.participant,
+                body.key?.participant,
                 body.key?.remoteJid,
+                data.key?.remoteJid,
                 data.remoteJid,
                 data.chatId,
                 body.chat?.id,
                 body.chatId,
-                body.phone,
                 data.key?.participant,
-                body.participant,
-                body.key?.participant,
+                data.participant,
                 senderRaw,
-                body.sender?.id,
-                body.sender?.phone,
-                body.sender
+                body.author
             ], selfNumbers);
         if (!fromMe && !chatId && senderResolved && !selfNumbers.has(senderResolved)) {
             chatId = senderResolved;
