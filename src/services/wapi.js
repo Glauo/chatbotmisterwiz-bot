@@ -64,15 +64,6 @@ async function sendMessage(phone, message) {
             return;
         }
 
-        // Evolution API v2.x aceita tanto "number" quanto "number@s.whatsapp.net"
-        // Vamos garantir o formato correto
-        const formattedNumber = number.includes('@') ? number : `${number}@s.whatsapp.net`;
-        
-        const payload = {
-            number: formattedNumber,
-            text: message
-        };
-
         const config = {
             headers: {
                 apikey: EVOLUTION_API_KEY,
@@ -80,19 +71,35 @@ async function sendMessage(phone, message) {
             }
         };
 
-        console.log(`Sending to ${number}...`);
+        // Algumas instalações aceitam apenas dígitos; outras aceitam JID com sufixo.
+        // Tenta primeiro com dígitos (padrão mais estável) e, se falhar 400, tenta JID.
+        const candidates = [number, `${number}@s.whatsapp.net`];
+        let lastError = null;
 
-        const response = await axios.post(url, payload, config);
-        if (DEBUG_WEBHOOK) {
+        for (const candidate of candidates) {
             try {
-                console.log('EVO SEND RESPONSE:', JSON.stringify(response.data));
-            } catch (e) {
-                console.log('EVO SEND RESPONSE: <serialize error>');
+                console.log(`Sending to ${candidate}...`);
+                const payload = { number: candidate, text: message };
+                const response = await axios.post(url, payload, config);
+                if (DEBUG_WEBHOOK) {
+                    try {
+                        console.log('EVO SEND RESPONSE:', JSON.stringify(response.data));
+                    } catch (e) {
+                        console.log('EVO SEND RESPONSE: <serialize error>');
+                    }
+                }
+                console.log('Message sent.');
+                return response.data;
+            } catch (error) {
+                lastError = error;
+                const status = error?.response?.status;
+                if (status !== 400) break;
+                if (DEBUG_WEBHOOK) {
+                    console.log(`EVO SEND fallback: formato ${candidate} rejeitado com 400, tentando próximo...`);
+                }
             }
         }
-
-        console.log('Message sent.');
-        return response.data;
+        throw lastError || new Error('Falha desconhecida ao enviar mensagem');
     } catch (error) {
         console.error('Evolution API send error:');
         if (error.response) {
