@@ -26,6 +26,7 @@ const BOT_SELF_NUMBER = String(
     ""
 ).replace(/\D/g, "");
 
+// Mantemos o padrão ativado para pausar sozinho quando um humano assume
 const PAUSA_AUTOMATICA_ADMIN_ONLY = String(process.env.PAUSA_AUTOMATICA_ADMIN_ONLY || "true").toLowerCase() !== "false";
 const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "true").toLowerCase() === "true"; 
 
@@ -94,13 +95,6 @@ app.post('/webhook', async (req, res) => {
         const body = req.body || {};
         const data = body.data || body;
 
-        // Se estiver ativado, mostra todo o pacote de dados no log
-        if (DEBUG_WEBHOOK) {
-            console.log("🧭 WEBHOOK RAW START ---");
-            console.log(JSON.stringify(body, null, 2).slice(0, 3000));
-            console.log("--- WEBHOOK RAW END 🧭");
-        }
-
         // Deduplicação de Mensagem
         const messageId = data?.key?.id || data?.id || body?.key?.id || body?.id || body?.data?.key?.id;
         if (messageId) {
@@ -132,7 +126,6 @@ app.post('/webhook', async (req, res) => {
         // 🎭 FUNÇÃO ANTI-MÁSCARA: Desvia de IDs @lid
         // ==========================================
         if (rawJid.includes('@lid') || rawJid.includes('@tampa') || !rawJid.includes('@')) {
-            // Se o remetente oficial for uma máscara, procuramos o número real em outras "gavetas"
             const backupFields = [
                 data?.key?.participant,
                 body?.key?.participant,
@@ -146,7 +139,7 @@ app.post('/webhook', async (req, res) => {
                 if (field && typeof field === 'string' && field.includes('@s.whatsapp.net') && !field.includes('@lid')) {
                     console.log(`🎭 MÁSCARA DETECTADA! Trocando LID (${rawJid}) pelo número real (${field})`);
                     rawJid = field;
-                    break; // Achou o número real, para de procurar
+                    break;
                 }
             }
         }
@@ -156,11 +149,12 @@ app.post('/webhook', async (req, res) => {
 
         const messageText = getMessageText(body);
 
+        // Se for áudio, foto sem legenda ou vazio, ignora em silêncio.
         if (!chatLimpo || !messageText) {
-            return res.status(200).send('Ignorado (Falta dados)');
+            return res.status(200).send('Ignorado (Falta dados ou eh midia)');
         }
 
-        // Evita que o bot responda a si mesmo
+        // Evita que o bot responda ao próprio número de instância (Self)
         if (!fromMe && BOT_SELF_NUMBER && chatLimpo === BOT_SELF_NUMBER) {
             return res.status(200).send('Ignorado (Self)');
         }
@@ -200,14 +194,21 @@ app.post('/webhook', async (req, res) => {
             return res.status(200).send('Pausado');
         }
 
+        // ==========================================
+        // 🛑 CORREÇÃO AQUI: PARADA ABSOLUTA PARA MENSAGENS "fromMe"
+        // ==========================================
         if (fromMe) {
-            if (ehEcoDoBot(chatLimpo, messageText)) return res.status(200).send('Ignorado (eco)');
-            if (adminMatch && PAUSA_AUTOMATICA_ADMIN_ONLY) {
-                pauseChat(chatLimpo);
-                clearHistory(chatLimpo);
-                console.log(`🛑 PAUSA AUTOMATICA (ADMIN ASSUMIU): ${chatLimpo}`);
-                return res.status(200).send('Pausado (assumido)');
+            if (ehEcoDoBot(chatLimpo, messageText)) {
+                return res.status(200).send('Ignorado (eco do bot)');
             }
+            
+            // Se o humano mandou mensagem, pausa o bot imediatamente
+            pauseChat(chatLimpo);
+            clearHistory(chatLimpo);
+            console.log(`🛑 PAUSA AUTOMATICA (HUMANO ASSUMIU): O bot não vai mais responder o cliente ${chatLimpo}`);
+            
+            // ESSENCIAL: Interrompe a execução aqui para a IA não responder a sua própria mensagem!
+            return res.status(200).send('Ignorado (Mensagem do proprio dono)');
         }
 
         // --- ZONA DA IA ---
