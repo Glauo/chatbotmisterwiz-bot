@@ -18,14 +18,6 @@ const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 
 const NUMERO_ADMIN = "5516993804499"; 
 
-const BOT_SELF_NUMBER = String(
-    process.env.BOT_SELF_NUMBER ||
-    process.env.WHATSAPP_BOT_NUMBER ||
-    process.env.INSTANCE_PHONE ||
-    process.env.OWNER_NUMBER ||
-    ""
-).replace(/\D/g, "");
-
 const PAUSA_AUTOMATICA_ADMIN_ONLY = String(process.env.PAUSA_AUTOMATICA_ADMIN_ONLY || "true").toLowerCase() !== "false";
 const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "true").toLowerCase() === "true"; 
 
@@ -154,12 +146,6 @@ app.post('/webhook', async (req, res) => {
         if (!chatLimpo || !messageText) {
             console.log(`🛑 Abortado: A mensagem não tem texto escrito ou o remetente está vazio (Pode ser um áudio/imagem sem legenda).`);
             return res.status(200).send('Ignorado (Falta dados ou eh midia)');
-        }
-
-        // Evita que o bot responda ao próprio número
-        if (!fromMe && BOT_SELF_NUMBER && chatLimpo === BOT_SELF_NUMBER) {
-            console.log(`🛑 Abortado: O bot tentou conversar consigo mesmo e foi bloqueado por segurança.`);
-            return res.status(200).send('Ignorado (Self)');
         }
 
         const texto = messageText.trim();
