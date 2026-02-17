@@ -1,7 +1,6 @@
 const axios = require('axios');
 require('dotenv').config();
 const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || '').toLowerCase() === 'true';
-const PHONE_COUNTRY_PREFIX = String(process.env.PHONE_COUNTRY_PREFIX || '').replace(/\D/g, '');
 
 function readEnv(...keys) {
     for (const key of keys) {
@@ -66,17 +65,12 @@ function buildNumberCandidates(value) {
 
     const candidates = [];
     if (hasJid) {
-        const low = base.toLowerCase();
-        if (low.endsWith('@s.whatsapp.net') || low.endsWith('@c.us')) {
-            candidates.push(base);
-        }
+        // Mantém qualquer JID recebido no webhook (@s.whatsapp.net, @c.us, @lid, etc.)
+        candidates.push(base);
     }
     if (digits) {
-        const prefixOk = !PHONE_COUNTRY_PREFIX || digits.startsWith(PHONE_COUNTRY_PREFIX);
-        if (prefixOk) {
-            candidates.push(digits);
-            candidates.push(`${digits}@s.whatsapp.net`);
-        }
+        candidates.push(digits);
+        candidates.push(`${digits}@s.whatsapp.net`);
     }
 
     return unique(candidates);

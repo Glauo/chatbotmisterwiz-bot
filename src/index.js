@@ -17,9 +17,6 @@ const DEDUP_TTL_MS = 60 * 1000; // 60 segundos de janela de deduplicação
 const BOT_ECHO_WINDOW_MS = 15000;
 const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 const NUMERO_ADMIN = "5516993804499"; 
-<<<<<<< HEAD
-=======
-const PHONE_COUNTRY_PREFIX = toDigits(process.env.PHONE_COUNTRY_PREFIX || "");
 const BOT_SELF_NUMBER = toDigits(
     process.env.BOT_SELF_NUMBER ||
     process.env.WHATSAPP_BOT_NUMBER ||
@@ -27,7 +24,6 @@ const BOT_SELF_NUMBER = toDigits(
     process.env.OWNER_NUMBER ||
     ""
 );
->>>>>>> f5e08543aea083d0452b5504d347e4f6d583fed1
 // Safer default: only pause chats manually/admin unless explicitly disabled.
 const PAUSA_AUTOMATICA_ADMIN_ONLY = String(process.env.PAUSA_AUTOMATICA_ADMIN_ONLY || "true").toLowerCase() !== "false";
 // Optional guard for advanced takeover flows; disabled by default.
@@ -158,9 +154,7 @@ function resolveLidToPhone(value) {
 
 function isLikelyPhoneDigits(value) {
     const digits = toDigits(value);
-    if (!(digits.length >= 10 && digits.length <= 15)) return false;
-    if (PHONE_COUNTRY_PREFIX && !digits.startsWith(PHONE_COUNTRY_PREFIX)) return false;
-    return true;
+    return digits.length >= 10 && digits.length <= 15;
 }
 
 function collectPhoneCandidatesFromPayload(payload, out = []) {
@@ -226,6 +220,7 @@ function buildSelfNumberSet(body, data, fromMe) {
 }
 
 function pickInboundChatId(candidates, selfNumbers) {
+    let fallbackCandidate = "";
     for (const candidate of candidates) {
         const id = extractId(candidate);
         if (!id) continue;
@@ -234,20 +229,22 @@ function pickInboundChatId(candidates, selfNumbers) {
 
         const mapped = resolveLidToPhone(id);
         const base = idStr.split(":")[0];
-        // Não usar @lid sem mapeamento prévio.
-        if (!mapped && base.endsWith("@lid")) continue;
-        // Se tiver sufixo, aceitar apenas IDs clássicos do WhatsApp.
-        if (!mapped && base.includes("@") && !base.endsWith("@s.whatsapp.net") && !base.endsWith("@c.us")) continue;
+        const hasUnknownSuffix = !mapped && base.includes("@") && !base.endsWith("@s.whatsapp.net") && !base.endsWith("@c.us");
 
         const chosen = mapped || id;
         const digits = toDigits(String(chosen).split(":")[0]);
+
+        if (hasUnknownSuffix) {
+            if (!fallbackCandidate) fallbackCandidate = chosen;
+            continue;
+        }
 
         if (!isLikelyPhoneDigits(digits)) continue;
         if (selfNumbers.has(digits)) continue;
 
         return chosen;
     }
-    return "";
+    return fallbackCandidate;
 }
 
 function pauseChat(chatId) {
@@ -514,9 +511,6 @@ app.post('/webhook', async (req, res) => {
 
         const texto = messageText.trim();
         const comando = texto.toLowerCase().split(" ")[0];
-<<<<<<< HEAD
-        const chatLimpo = toDigits(chatId); // ID limpo para usar na memÃ³ria
-=======
         const chatLimpo = (sender && !selfNumbers.has(sender)) ? sender : toDigits(chatId); // ID da conversa para memÃ³ria
 
         // Proteção: nunca responder para o próprio número do bot.
@@ -526,8 +520,6 @@ app.post('/webhook', async (req, res) => {
             }
             return res.status(200).send('Ignorado (self)');
         }
-
->>>>>>> f5e08543aea083d0452b5504d347e4f6d583fed1
         rememberLidMapping(body.sender?.senderLid, senderRaw);
         rememberLidMapping(body.sender?.senderLid, chatId);
         rememberLidMapping(body.chat?.id, chatId);
@@ -674,8 +666,3 @@ app.listen(PORT, () => {
     console.log(`ðŸš€ Servidor rodando na porta ${PORT}`);
     console.log(`ðŸ§  MemÃ³ria ativada para conversas contÃ­nuas.`);
 });
-
-<<<<<<< HEAD
-=======
-
->>>>>>> f5e08543aea083d0452b5504d347e4f6d583fed1
