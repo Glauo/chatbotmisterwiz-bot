@@ -17,6 +17,7 @@ const DEDUP_TTL_MS = 60 * 1000; // 60 segundos de janela de deduplicação
 const BOT_ECHO_WINDOW_MS = 15000;
 const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 const NUMERO_ADMIN = "5516993804499"; 
+const PHONE_COUNTRY_PREFIX = toDigits(process.env.PHONE_COUNTRY_PREFIX || "55");
 const BOT_SELF_NUMBER = toDigits(
     process.env.BOT_SELF_NUMBER ||
     process.env.WHATSAPP_BOT_NUMBER ||
@@ -154,7 +155,9 @@ function resolveLidToPhone(value) {
 
 function isLikelyPhoneDigits(value) {
     const digits = toDigits(value);
-    return digits.length >= 10 && digits.length <= 15;
+    if (!(digits.length >= 10 && digits.length <= 15)) return false;
+    if (PHONE_COUNTRY_PREFIX && !digits.startsWith(PHONE_COUNTRY_PREFIX)) return false;
+    return true;
 }
 
 function resolveBestPhoneId(...values) {
@@ -354,8 +357,12 @@ app.post('/webhook', async (req, res) => {
             body.participant,
             body.key?.participant,
             body.key?.remoteJid,
+            body.key?.participantPn,
+            body.key?.remoteJidPn,
             data.key?.participant,
             data.key?.remoteJid,
+            data.key?.participantPn,
+            data.key?.remoteJidPn,
             data.remoteJid,
             data.participant,
             data.sender?.id,
@@ -373,8 +380,12 @@ app.post('/webhook', async (req, res) => {
             body.participant,
             body.key?.participant,
             body.key?.remoteJid,
+            body.key?.participantPn,
+            body.key?.remoteJidPn,
             data.key?.participant,
             data.key?.remoteJid,
+            data.key?.participantPn,
+            data.key?.remoteJidPn,
             data.remoteJid,
             data.participant,
             data.sender?.id,
@@ -409,13 +420,17 @@ app.post('/webhook', async (req, res) => {
             body.participant,
             body.key?.participant,
             body.key?.remoteJid,
+            body.key?.participantPn,
+            body.key?.remoteJidPn,
             data.key?.remoteJid,
+            data.key?.remoteJidPn,
             data.remoteJid,
             data.chatId,
             body.chat?.id,
             body.chatId,
             body.to,
             data.key?.participant,
+            data.key?.participantPn,
             data.participant
         );
         // For inbound messages, reply to the sender chat.
@@ -440,12 +455,16 @@ app.post('/webhook', async (req, res) => {
                 body.participant,
                 body.key?.participant,
                 body.key?.remoteJid,
+                body.key?.participantPn,
+                body.key?.remoteJidPn,
                 data.key?.remoteJid,
+                data.key?.remoteJidPn,
                 data.remoteJid,
                 data.chatId,
                 body.chat?.id,
                 body.chatId,
                 data.key?.participant,
+                data.key?.participantPn,
                 data.participant,
                 senderRaw,
                 body.author
