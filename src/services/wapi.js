@@ -1,7 +1,7 @@
 const axios = require('axios');
 require('dotenv').config();
 const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || '').toLowerCase() === 'true';
-const PHONE_COUNTRY_PREFIX = String(process.env.PHONE_COUNTRY_PREFIX || '55').replace(/\D/g, '');
+const PHONE_COUNTRY_PREFIX = String(process.env.PHONE_COUNTRY_PREFIX || '').replace(/\D/g, '');
 
 function readEnv(...keys) {
     for (const key of keys) {

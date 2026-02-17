@@ -17,7 +17,7 @@ const DEDUP_TTL_MS = 60 * 1000; // 60 segundos de janela de deduplicação
 const BOT_ECHO_WINDOW_MS = 15000;
 const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 const NUMERO_ADMIN = "5516993804499"; 
-const PHONE_COUNTRY_PREFIX = toDigits(process.env.PHONE_COUNTRY_PREFIX || "55");
+const PHONE_COUNTRY_PREFIX = toDigits(process.env.PHONE_COUNTRY_PREFIX || "");
 const BOT_SELF_NUMBER = toDigits(
     process.env.BOT_SELF_NUMBER ||
     process.env.WHATSAPP_BOT_NUMBER ||
@@ -158,6 +158,21 @@ function isLikelyPhoneDigits(value) {
     if (!(digits.length >= 10 && digits.length <= 15)) return false;
     if (PHONE_COUNTRY_PREFIX && !digits.startsWith(PHONE_COUNTRY_PREFIX)) return false;
     return true;
+}
+
+function collectPhoneCandidatesFromPayload(payload, out = []) {
+    if (payload == null) return out;
+    if (typeof payload === "string") {
+        const v = payload.trim();
+        if (!v) return out;
+        out.push(v);
+        return out;
+    }
+    if (typeof payload !== "object") return out;
+    for (const value of Object.values(payload)) {
+        collectPhoneCandidatesFromPayload(value, out);
+    }
+    return out;
 }
 
 function resolveBestPhoneId(...values) {
@@ -474,6 +489,14 @@ app.post('/webhook', async (req, res) => {
         } else if (!fromMe) {
             const mappedChat = resolveLidToPhone(chatId);
             if (mappedChat) chatId = mappedChat;
+        }
+        if (!fromMe && !chatId) {
+            // Fallback ultra-defensivo: varre todo payload para achar jid/telefone real
+            const allCandidates = collectPhoneCandidatesFromPayload(body);
+            chatId = pickInboundChatId(allCandidates, selfNumbers);
+            if (!chatId && DEBUG_WEBHOOK) {
+                console.log("[WEBHOOK] fallback scan não encontrou chat válido");
+            }
         }
         const messageText = getMessageText(body);
 
