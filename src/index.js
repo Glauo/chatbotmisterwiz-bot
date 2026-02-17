@@ -5,20 +5,18 @@ const { getGroqResponse, clearHistory } = require('./services/ai');
 const { sendMessage } = require('./services/wapi');
 
 const app = express();
-const PORT = process.env.PORT || 8080; // Garantindo a porta 8080 que apareceu no seu log
+const PORT = process.env.PORT || 8080; 
 
 const conversasPausadas = new Set();
 const ultimosEnviosBot = new Map();
 const mensagensBotIds = new Map();
-const lidToPhone = new Map();
 const processedMessageIds = new Map(); 
+
 const DEDUP_TTL_MS = 60 * 1000; 
 const BOT_ECHO_WINDOW_MS = 15000;
 const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 
 const NUMERO_ADMIN = "5516993804499"; 
-const MODO_TESTE = false; // <-- DESATIVADO: O bot vai atender a todos agora
-const NUMEROS_PERMITIDOS = ["5516997237745", NUMERO_ADMIN]; 
 
 const BOT_SELF_NUMBER = toDigits(
     process.env.BOT_SELF_NUMBER ||
@@ -30,7 +28,7 @@ const BOT_SELF_NUMBER = toDigits(
 
 const PAUSA_AUTOMATICA_ADMIN_ONLY = String(process.env.PAUSA_AUTOMATICA_ADMIN_ONLY || "true").toLowerCase() !== "false";
 const AUTO_PAUSE_ON_STATUS = String(process.env.AUTO_PAUSE_ON_STATUS || "").toLowerCase() === "true";
-const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "true").toLowerCase() === "true"; // Ativado para forçar logs de erro
+const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "true").toLowerCase() === "true"; 
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -42,74 +40,33 @@ function toDigits(value) {
     return String(value || "").replace(/\D/g, "");
 }
 
-function extractId(value) {
-    if (!value) return "";
-    if (typeof value === "string" || typeof value === "number") return String(value);
-    if (typeof value === "object") {
-        return (
-            value.id ||
-            value.user ||
-            value.phone ||
-            value.jid ||
-            value.remoteJid ||
-            value.chatId ||
-            value._serialized ||
-            ""
-        );
-    }
-    return "";
-}
-
-function pickFirstId(...values) {
-    for (const v of values) {
-        const id = extractId(v);
-        if (!id) continue;
-        const strId = String(id).toLowerCase();
-        if (strId.includes('@lid') || strId.includes('@tampa') || strId.includes('status@')) {
-            continue;
+// ==========================================
+// MÁQUINA DE RAIO-X: Caça números de telefone
+// ==========================================
+function collectPhoneCandidatesFromPayload(payload, out = []) {
+    if (payload == null) return out;
+    if (typeof payload === "string" || typeof payload === "number") {
+        const v = String(payload).trim();
+        const digits = v.replace(/\D/g, "");
+        // Números de WhatsApp têm entre 10 e 18 dígitos
+        if (digits.length >= 10 && digits.length <= 18) {
+            out.push(digits);
         }
-        return id;
+        return out;
     }
-    return "";
-}
-
-function pickFirstString(...values) {
-    for (const v of values) {
-        if (typeof v === "string" && v.trim()) return v;
+    if (typeof payload !== "object") return out;
+    for (const value of Object.values(payload)) {
+        collectPhoneCandidatesFromPayload(value, out);
     }
-    return "";
-}
-
-function getEventType(body) {
-    if (!body || typeof body !== "object") return "";
-    return pickFirstString(
-        body.event,
-        body.type,
-        body.eventType,
-        body.action,
-        body.data?.event,
-        body.data?.type,
-        body.data?.eventType,
-        body.data?.action
-    );
-}
-
-function getPayloadData(body) {
-    if (!body || typeof body !== "object") return {};
-    const data = body.data && typeof body.data === "object" ? body.data : body;
-    if (data?.messages && Array.isArray(data.messages) && data.messages.length) {
-        return data.messages[0];
-    }
-    if (data?.message && (data.message.key || data.message.message)) {
-        return data.message;
-    }
-    return data;
+    return out;
 }
 
 function getMessageText(body) {
-    const data = getPayloadData(body);
+    if (!body || typeof body !== "object") return "";
+    const data = body.data && typeof body.data === "object" ? body.data : body;
     const msg = data.message || data.msgContent || body.msgContent || data;
-    return pickFirstString(
+    
+    const candidates = [
         msg?.conversation,
         msg?.extendedTextMessage?.text,
         msg?.text,
@@ -123,7 +80,12 @@ function getMessageText(body) {
         body?.body,
         body?.text,
         body?.message
-    );
+    ];
+    
+    for (const v of candidates) {
+        if (typeof v === "string" && v.trim()) return v;
+    }
+    return "";
 }
 
 function truthyFlag(value) {
@@ -132,156 +94,17 @@ function truthyFlag(value) {
     return false;
 }
 
-function normalizeChatId(value) {
-    const raw = String(value || "");
-    const base = raw.split(":")[0];
-    const digits = toDigits(base);
-    return { raw, base, digits };
-}
-
-function normalizeLid(value) {
-    const raw = String(value || "");
-    const base = raw.split(":")[0];
-    return (base.endsWith("@lid") || base.endsWith("@tampa")) ? base : "";
-}
-
-function rememberLidMapping(lid, phone) {
-    const lidBase = normalizeLid(lid);
-    const phoneDigits = toDigits(phone);
-    if (lidBase && phoneDigits) {
-        lidToPhone.set(lidBase, phoneDigits);
-    }
-}
-
-function resolveLidToPhone(value) {
-    const lidBase = normalizeLid(value);
-    if (!lidBase) return "";
-    return lidToPhone.get(lidBase) || "";
-}
-
-function isLikelyPhoneDigits(value) {
-    const digits = toDigits(value);
-    return digits.length >= 10 && digits.length <= 15;
-}
-
-function collectPhoneCandidatesFromPayload(payload, out = []) {
-    if (payload == null) return out;
-    if (typeof payload === "string") {
-        const v = payload.trim();
-        if (!v || v.toLowerCase().includes('@lid') || v.toLowerCase().includes('@tampa') || v.toLowerCase().includes('status@')) return out;
-        out.push(v);
-        return out;
-    }
-    if (typeof payload !== "object") return out;
-    for (const value of Object.values(payload)) {
-        collectPhoneCandidatesFromPayload(value, out);
-    }
-    return out;
-}
-
-function resolveBestPhoneId(...values) {
-    for (const v of values) {
-        const id = extractId(v);
-        if (!id) continue;
-        const mapped = resolveLidToPhone(id);
-        if (isLikelyPhoneDigits(mapped)) return mapped;
-        const base = String(id).split(":")[0];
-        if (base.endsWith("@lid") || base.endsWith("@tampa")) continue;
-        if (base.includes("@") && !base.endsWith("@s.whatsapp.net") && !base.endsWith("@c.us")) {
-            continue;
-        }
-        const direct = toDigits(base);
-        if (isLikelyPhoneDigits(direct)) return direct;
-    }
-    return "";
-}
-
-function buildSelfNumberSet(body, data, fromMe) {
-    const set = new Set();
-    if (BOT_SELF_NUMBER) set.add(BOT_SELF_NUMBER);
-    const instanceHints = [
-        body?.instance?.owner,
-        body?.instance?.number,
-        body?.instance?.wuid,
-        body?.me?.id,
-        body?.me?.phone
-    ];
-    for (const hint of instanceHints) {
-        const digits = toDigits(extractId(hint));
-        if (isLikelyPhoneDigits(digits)) set.add(digits);
-    }
-    if (fromMe) {
-        const senderHint = resolveBestPhoneId(
-            data?.key?.remoteJid,
-            body?.key?.remoteJid,
-            body?.sender?.phone,
-            body?.sender?.id,
-            data?.sender?.phone,
-            body?.from
-        );
-        if (senderHint) set.add(senderHint);
-    }
-    return set;
-}
-
-function pickInboundChatId(candidates, selfNumbers) {
-    let fallbackCandidate = "";
-    for (const candidate of candidates) {
-        const id = extractId(candidate);
-        if (!id) continue;
-        const idStr = String(id);
-        if (idStr.includes("@broadcast") || idStr.includes("@g.us")) continue;
-
-        const mapped = resolveLidToPhone(id);
-        const base = idStr.split(":")[0];
-        const hasUnknownSuffix = !mapped && base.includes("@") && !base.endsWith("@s.whatsapp.net") && !base.endsWith("@c.us");
-
-        const chosen = mapped || id;
-        const digits = toDigits(String(chosen).split(":")[0]);
-
-        if (hasUnknownSuffix) {
-            if (!fallbackCandidate && !base.endsWith("@lid") && !base.endsWith("@tampa")) {
-                fallbackCandidate = chosen;
-            }
-            continue;
-        }
-
-        if (!isLikelyPhoneDigits(digits)) continue;
-        if (selfNumbers.has(digits)) continue;
-
-        return chosen;
-    }
-    return fallbackCandidate;
-}
-
 function pauseChat(chatId) {
     if (!chatId) return;
-    const { raw, base, digits } = normalizeChatId(chatId);
-    if (digits) {
-        conversasPausadas.add(digits);
-        conversasPausadas.add(digits + "@c.us");
-        conversasPausadas.add(digits + "@s.whatsapp.net");
-    }
-    if (raw) conversasPausadas.add(raw);
-    if (base) conversasPausadas.add(base);
-}
-
-function cleanupMensagemBotIds() {
-    const now = Date.now();
-    for (const [id, ts] of mensagensBotIds.entries()) {
-        if (now - ts > BOT_MSG_ID_TTL_MS) mensagensBotIds.delete(id);
-    }
-}
-
-function registrarMensagemBotId(id) {
-    if (!id) return;
-    mensagensBotIds.set(String(id), Date.now());
-    cleanupMensagemBotIds();
+    conversasPausadas.add(chatId);
 }
 
 function isMensagemBotId(id) {
     if (!id) return false;
-    cleanupMensagemBotIds();
+    const now = Date.now();
+    for (const [mid, ts] of mensagensBotIds.entries()) {
+        if (now - ts > BOT_MSG_ID_TTL_MS) mensagensBotIds.delete(mid);
+    }
     return mensagensBotIds.has(String(id));
 }
 
@@ -294,25 +117,27 @@ function ehEcoDoBot(chaveChat, texto) {
     if (!chaveChat || !texto) return false;
     const info = ultimosEnviosBot.get(chaveChat);
     if (!info) return false;
-    const dentroJanela = Date.now() - info.ts <= BOT_ECHO_WINDOW_MS;
-    const mesmoTexto = info.texto === texto.trim();
-    if (dentroJanela && mesmoTexto) {
+    if (Date.now() - info.ts <= BOT_ECHO_WINDOW_MS && info.texto === texto.trim()) {
         ultimosEnviosBot.delete(chaveChat);
         return true;
     }
     return false;
 }
 
+// ==========================================
+// ROTA PRINCIPAL DO WEBHOOK
+// ==========================================
 app.post('/webhook', async (req, res) => {
     try {
         const body = req.body || {};
-        const data = getPayloadData(body);
+        const data = body.data || body;
 
-        const eventType = getEventType(body);
-        const eventUpper = String(eventType || "").toUpperCase();
-        console.log(`[WEBHOOK] evento=${eventUpper || 'UNKNOWN'}`);
+        // Se der problema, isso vai imprimir o JSON inteiro para descobrirmos onde o número está
+        if (DEBUG_WEBHOOK) {
+            console.log("🧭 WEBHOOK RAW:", JSON.stringify(body).slice(0, 3000));
+        }
 
-        // === DEDUPLICAÇÃO POR MESSAGE ID ===
+        // Deduplicação de Mensagem
         const messageId = data?.key?.id || data?.id || body?.key?.id || body?.id || body?.data?.key?.id;
         if (messageId) {
             const now = Date.now();
@@ -320,148 +145,59 @@ app.post('/webhook', async (req, res) => {
                 if (now - ts > DEDUP_TTL_MS) processedMessageIds.delete(id);
             }
             if (processedMessageIds.has(messageId)) {
-                console.log(`[DEDUP] Mensagem duplicada ignorada: ${messageId}`);
                 return res.status(200).send('Duplicada');
             }
             processedMessageIds.set(messageId, now);
         }
 
-        if (eventUpper === "WEBHOOKSTATUS") {
-            const statusFromMe = truthyFlag(body.fromMe);
-            if (statusFromMe && AUTO_PAUSE_ON_STATUS) {
-                const statusChatId = pickFirstId(
-                    data?.key?.remoteJid,
-                    body.chat?.id,
-                    body.chatId,
-                    body.to,
-                    body.from
-                );
-                const mappedPhone = resolveLidToPhone(statusChatId);
-                const statusMessageId = body.messageId || body.id || body.data?.messageId || body.data?.id;
-                const knownBot = isMensagemBotId(statusMessageId);
-                
-                if (statusMessageId && !knownBot) {
-                    const pauseTarget = mappedPhone || statusChatId;
-                    pauseChat(pauseTarget);
-                    const statusDigits = normalizeChatId(pauseTarget).digits;
-                    if (statusDigits) clearHistory(statusDigits);
-                    console.log(`PAUSA AUTOMATICA (STATUS fromMe): ${statusDigits || pauseTarget}`);
-                }
-            }
-            return res.status(200).send('Status');
-        }
+        const fromMe = truthyFlag(body.fromMe) || truthyFlag(body.key?.fromMe) || truthyFlag(data.fromMe) || truthyFlag(data.key?.fromMe);
 
-        const senderRaw = pickFirstId(
-            data?.key?.remoteJid,
-            body?.key?.remoteJid,
-            data?.remoteJid,
-            body?.sender?.phone,
-            body?.from,
-            body?.phone,
-            body?.sender?.id,
-            body?.participant,
-            data?.participant
-        );
-        
-        const senderResolved = resolveBestPhoneId(
-            data?.key?.remoteJid,
-            body?.key?.remoteJid,
-            data?.remoteJid,
-            body?.sender?.phone,
-            body?.from,
-            body?.sender?.id
-        );
-        
-        const sender = senderResolved || toDigits(senderRaw);
-        const fromMe =
-            truthyFlag(body.fromMe) ||
-            truthyFlag(body.key?.fromMe) ||
-            truthyFlag(body.data?.fromMe) ||
-            truthyFlag(data.fromMe) ||
-            truthyFlag(data.key?.fromMe) ||
-            truthyFlag(body.sender?.fromMe) ||
-            truthyFlag(body.sender?.isMe) ||
-            truthyFlag(body.sender?.isOwner);
-            
-        const selfNumbers = buildSelfNumberSet(body, data, fromMe);
-        const adminMatch =
-            sender.includes(NUMERO_ADMIN) ||
-            toDigits(extractId(body.author)).includes(NUMERO_ADMIN) ||
-            toDigits(extractId(body.participant)).includes(NUMERO_ADMIN) ||
-            toDigits(extractId(body.key?.participant)).includes(NUMERO_ADMIN);
+        // 1. Identificar quem é o bot para não falar sozinho
+        const selfNumbers = new Set();
+        if (BOT_SELF_NUMBER) selfNumbers.add(BOT_SELF_NUMBER);
+        [body?.instance?.owner, body?.instance?.number, body?.me?.phone].forEach(h => {
+            const d = toDigits(h);
+            if (d && d.length >= 10) selfNumbers.add(d);
+        });
 
-        const chatIdDefault = pickFirstId(
-            data?.key?.remoteJid,
-            body?.key?.remoteJid,
-            data?.remoteJid,
-            body?.from,
-            body?.sender?.phone,
-            body?.chat?.id,
-            body?.chatId
-        );
+        // 2. Extrair TODOS os possíveis números do webhook
+        let allCandidates = [];
+        collectPhoneCandidatesFromPayload(body, allCandidates);
+        allCandidates = [...new Set(allCandidates)];
         
-        let chatId = fromMe
-            ? pickFirstId(
-                body.to,
-                body.phone,
-                data.key?.remoteJid,
-                body.chat?.id,
-                body.chatId,
-                body.key?.remoteJid,
-                body.from,
-                chatIdDefault
-            )
-            : pickInboundChatId([
-                data?.key?.remoteJid,
-                body?.key?.remoteJid,
-                data?.remoteJid,
-                body?.sender?.phone,
-                body?.from,
-                body?.phone,
-                body?.sender?.id,
-                chatIdDefault
-            ], selfNumbers);
+        // 3. Filtrar lixo e o próprio número do bot
+        allCandidates = allCandidates.filter(num => {
+            if (selfNumbers.has(num) && !fromMe) return false;
+            if (/^17[0-3]\d{10}$/.test(num)) return false; // Ignora timestamps disfarçados de telefone
+            return true;
+        });
+
+        // 4. ORDENAÇÃO INTELIGENTE (O Segredo do Sucesso)
+        allCandidates.sort((a, b) => {
+            const aBR = a.startsWith('55');
+            const bBR = b.startsWith('55');
+            if (aBR && !bBR) return -1; // Joga números brasileiros pro topo!
+            if (!aBR && bBR) return 1;
             
-        if (!fromMe && !chatId && senderResolved && !selfNumbers.has(senderResolved)) {
-            chatId = senderResolved;
-        } else if (!fromMe) {
-            const mappedChat = resolveLidToPhone(chatId);
-            if (mappedChat) chatId = mappedChat;
-        }
-        
-        if (!fromMe && !chatId) {
-            const allCandidates = collectPhoneCandidatesFromPayload(body);
-            chatId = pickInboundChatId(allCandidates, selfNumbers);
-        }
-        
+            const aLid = a.startsWith('30') || a.startsWith('49') || a.startsWith('1203');
+            const bLid = b.startsWith('30') || b.startsWith('49') || b.startsWith('1203');
+            if (!aLid && bLid) return -1; // Rebaixa IDs internos
+            if (aLid && !bLid) return 1;
+            
+            return 0;
+        });
+
+        // O melhor número vence!
+        const chatLimpo = allCandidates[0]; 
         const messageText = getMessageText(body);
 
-        // LOG DE SEGURANÇA: Avisa por que abortou se não achar o texto ou o ID
-        if (!chatId || !messageText) {
-            console.log('[WEBHOOK] ❌ Mensagem ignorada: Faltou chatId ou não tem texto.', { chatId, temTexto: Boolean(messageText) });
+        if (!chatLimpo || !messageText) {
             return res.status(200).send('Ignorado');
         }
 
         const texto = messageText.trim();
         const comando = texto.toLowerCase().split(" ")[0];
-        const chatLimpo = (sender && !selfNumbers.has(sender)) ? sender : toDigits(chatId);
-
-        // LOG DE SEGURANÇA: Trava de teste
-        if (MODO_TESTE && !fromMe && !NUMEROS_PERMITIDOS.includes(chatLimpo)) {
-            console.log(`[MODO TESTE] 🚧 Cliente bloqueado pela trava de teste: ${chatLimpo}`);
-            return res.status(200).send('Ignorado (Modo Teste)');
-        }
-
-        // LOG DE SEGURANÇA: Loop do bot
-        if (!fromMe && chatLimpo && selfNumbers.has(chatLimpo)) {
-            console.log(`[WEBHOOK] 🔄 Mensagem ignorada: o bot tentou conversar consigo mesmo no número ${chatLimpo}`);
-            return res.status(200).send('Ignorado (self)');
-        }
-        
-        rememberLidMapping(body.sender?.senderLid, senderRaw);
-        rememberLidMapping(body.sender?.senderLid, chatId);
-        rememberLidMapping(body.chat?.id, chatId);
-        rememberLidMapping(data.key?.remoteJid, chatId);
+        const adminMatch = allCandidates.includes(NUMERO_ADMIN);
 
         // --- ZONA DE COMANDO (Admin) ---
         if (adminMatch) {
@@ -470,10 +206,8 @@ app.post('/webhook', async (req, res) => {
                 if (alvo) {
                     const alvoLimpo = alvo.replace(/\D/g, "");
                     conversasPausadas.add(alvoLimpo); 
-                    conversasPausadas.add(alvoLimpo + "@c.us");
-                    conversasPausadas.add(alvoLimpo + "@s.whatsapp.net");
                     console.log(`🛑 ADMIN PAUSOU: ${alvoLimpo}`);
-                    await sendMessage(chatId, `🛑 Bot pausado para ${alvoLimpo}.`);
+                    await sendMessage(chatLimpo, `🛑 Bot pausado para ${alvoLimpo}.`);
                 }
                 return res.status(200).send('Admin');
             }
@@ -483,28 +217,23 @@ app.post('/webhook', async (req, res) => {
                 if (alvo) {
                     const alvoLimpo = alvo.replace(/\D/g, "");
                     conversasPausadas.delete(alvoLimpo);
-                    conversasPausadas.delete(alvoLimpo + "@c.us");
-                    conversasPausadas.delete(alvoLimpo + "@s.whatsapp.net");
                     clearHistory(alvoLimpo); 
                     console.log(`🟢 ADMIN REATIVOU: ${alvoLimpo}`);
-                    await sendMessage(chatId, `🟢 Bot reativado para ${alvoLimpo}.`);
+                    await sendMessage(chatLimpo, `🟢 Bot reativado para ${alvoLimpo}.`);
                 }
                 return res.status(200).send('Admin');
             }
         }
 
-        // --- ZONA DE PAUSA ---
-        if (conversasPausadas.has(chatLimpo) || conversasPausadas.has(chatId)) {
-            console.log(`[WEBHOOK] ⏸️ Conversa ignorada porque está pausada: ${chatLimpo}`);
+        // --- ZONA DE PAUSA E ECO ---
+        if (conversasPausadas.has(chatLimpo)) {
             return res.status(200).send('Pausado');
         }
 
         if (fromMe) {
-            const ecoBot = ehEcoDoBot(chatLimpo, messageText) || ehEcoDoBot(chatId, messageText);
-            if (ecoBot) return res.status(200).send('Ignorado (eco bot)');
-
+            if (ehEcoDoBot(chatLimpo, messageText)) return res.status(200).send('Ignorado (eco)');
             if (adminMatch && PAUSA_AUTOMATICA_ADMIN_ONLY) {
-                pauseChat(chatId);
+                pauseChat(chatLimpo);
                 clearHistory(chatLimpo);
                 console.log(`🛑 PAUSA AUTOMATICA (ADMIN ASSUMIU): ${chatLimpo}`);
                 return res.status(200).send('Pausado (assumido)');
@@ -518,32 +247,14 @@ app.post('/webhook', async (req, res) => {
         
         console.log(`🧠 IA: ${aiResponse}`);
         registrarEnvioBot(chatLimpo, aiResponse);
-        registrarEnvioBot(chatId, aiResponse);
         
-        const replyTargets = [
-            data?.key?.remoteJid,
-            chatId,
-            body?.key?.remoteJid,
-            body?.from,
-            body?.phone
-        ].filter(Boolean).filter((target) => {
-            const strTarget = String(target).toLowerCase();
-            if (strTarget.includes('@lid') || strTarget.includes('@tampa') || strTarget.includes('@broadcast') || strTarget.includes('status@')) {
-                return false;
-            }
-            const d = toDigits(strTarget.split(":")[0]);
-            return !d || !selfNumbers.has(d);
-        });
-
-        const sendResult = await sendMessage(replyTargets, aiResponse);
-        const sentMessageId =
-            sendResult?.key?.id ||
-            sendResult?.data?.key?.id ||
-            sendResult?.messageId ||
-            sendResult?.id ||
-            sendResult?.data?.messageId ||
-            sendResult?.data?.id;
-        registrarMensagemBotId(sentMessageId);
+        // Passamos APENAS o número limpo e correto, sem LIDs!
+        const sendResult = await sendMessage([chatLimpo], aiResponse);
+        
+        const sentMessageId = sendResult?.key?.id || sendResult?.data?.key?.id || sendResult?.messageId || sendResult?.id;
+        if (sentMessageId) {
+            mensagensBotIds.set(String(sentMessageId), Date.now());
+        }
 
         res.status(200).send('OK');
 
