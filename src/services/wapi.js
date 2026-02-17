@@ -1,6 +1,7 @@
 const axios = require('axios');
 require('dotenv').config();
 const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || '').toLowerCase() === 'true';
+const PHONE_COUNTRY_PREFIX = String(process.env.PHONE_COUNTRY_PREFIX || '').replace(/\D/g, '');
 
 function readEnv(...keys) {
     for (const key of keys) {
@@ -43,6 +44,44 @@ function cleanNumber(value) {
     return base.replace(/\D/g, '');
 }
 
+function unique(values) {
+    const out = [];
+    const seen = new Set();
+    for (const value of values) {
+        const key = String(value || '').trim();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(key);
+    }
+    return out;
+}
+
+function buildNumberCandidates(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return [];
+
+    const base = raw.split(':')[0].trim();
+    const hasJid = base.includes('@');
+    const digits = base.replace(/\D/g, '');
+
+    const candidates = [];
+    if (hasJid) {
+        const low = base.toLowerCase();
+        if (low.endsWith('@s.whatsapp.net') || low.endsWith('@c.us')) {
+            candidates.push(base);
+        }
+    }
+    if (digits) {
+        const prefixOk = !PHONE_COUNTRY_PREFIX || digits.startsWith(PHONE_COUNTRY_PREFIX);
+        if (prefixOk) {
+            candidates.push(digits);
+            candidates.push(`${digits}@s.whatsapp.net`);
+        }
+    }
+
+    return unique(candidates);
+}
+
 function buildEvolutionUrl() {
     const base = String(EVOLUTION_API_URL || '').replace(/\/+$/, '');
     const instance = encodeURIComponent(String(EVOLUTION_INSTANCE || ''));
@@ -58,16 +97,12 @@ async function sendMessage(phone, message) {
         }
 
         const url = buildEvolutionUrl();
-        const number = cleanNumber(phone);
-        if (!number) {
+        const sourceList = Array.isArray(phone) ? phone : [phone];
+        const candidates = unique(sourceList.flatMap(buildNumberCandidates));
+        if (!candidates.length) {
             console.error('Invalid number for send:', phone);
             return;
         }
-
-        const payload = {
-            number,
-            text: message
-        };
 
         const config = {
             headers: {
@@ -76,19 +111,33 @@ async function sendMessage(phone, message) {
             }
         };
 
-        console.log(`Sending to ${number}...`);
+        // Tenta múltiplos formatos/destinos (inclui JID bruto quando existir).
+        let lastError = null;
 
-        const response = await axios.post(url, payload, config);
-        if (DEBUG_WEBHOOK) {
+        for (const candidate of candidates) {
             try {
-                console.log('EVO SEND RESPONSE:', JSON.stringify(response.data));
-            } catch (e) {
-                console.log('EVO SEND RESPONSE: <serialize error>');
+                console.log(`Sending to ${candidate}...`);
+                const payload = { number: candidate, text: message };
+                const response = await axios.post(url, payload, config);
+                if (DEBUG_WEBHOOK) {
+                    try {
+                        console.log('EVO SEND RESPONSE:', JSON.stringify(response.data));
+                    } catch (e) {
+                        console.log('EVO SEND RESPONSE: <serialize error>');
+                    }
+                }
+                console.log('Message sent.');
+                return response.data;
+            } catch (error) {
+                lastError = error;
+                const status = error?.response?.status;
+                if (status !== 400) break;
+                if (DEBUG_WEBHOOK) {
+                    console.log(`EVO SEND fallback: formato ${candidate} rejeitado com 400, tentando próximo...`);
+                }
             }
         }
-
-        console.log('Message sent.');
-        return response.data;
+        throw lastError || new Error('Falha desconhecida ao enviar mensagem');
     } catch (error) {
         console.error('Evolution API send error:');
         if (error.response) {
