@@ -1,25 +1,24 @@
 ﻿const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '..', '.env'), override: true });
 const express = require('express');
-// Importamos também o clearHistory para limpar memória quando der !pare ou !volte
 const { getGroqResponse, clearHistory } = require('./services/ai'); 
 const { sendMessage } = require('./services/wapi');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080; // Garantindo a porta 8080 que apareceu no seu log
 
 const conversasPausadas = new Set();
 const ultimosEnviosBot = new Map();
 const mensagensBotIds = new Map();
 const lidToPhone = new Map();
-const processedMessageIds = new Map(); // Deduplicação por message ID
-const DEDUP_TTL_MS = 60 * 1000; // 60 segundos de janela de deduplicação
+const processedMessageIds = new Map(); 
+const DEDUP_TTL_MS = 60 * 1000; 
 const BOT_ECHO_WINDOW_MS = 15000;
 const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 
-const NUMERO_ADMIN = "5516996043314"; 
-const MODO_FALSE = true; // Mude para false para o bot atender todo mundo
-const NUMEROS_PERMITIDOS = ["5516993804499", NUMERO_ADMIN]; // Números que o bot vai responder agora
+const NUMERO_ADMIN = "5516993804499"; 
+const MODO_TESTE = false; // <-- DESATIVADO: O bot vai atender a todos agora
+const NUMEROS_PERMITIDOS = ["5516997237745", NUMERO_ADMIN]; 
 
 const BOT_SELF_NUMBER = toDigits(
     process.env.BOT_SELF_NUMBER ||
@@ -28,11 +27,10 @@ const BOT_SELF_NUMBER = toDigits(
     process.env.OWNER_NUMBER ||
     ""
 );
-// Safer default: only pause chats manually/admin unless explicitly disabled.
+
 const PAUSA_AUTOMATICA_ADMIN_ONLY = String(process.env.PAUSA_AUTOMATICA_ADMIN_ONLY || "true").toLowerCase() !== "false";
-// Optional guard for advanced takeover flows; disabled by default.
 const AUTO_PAUSE_ON_STATUS = String(process.env.AUTO_PAUSE_ON_STATUS || "").toLowerCase() === "true";
-const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "").toLowerCase() === "true";
+const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "true").toLowerCase() === "true"; // Ativado para forçar logs de erro
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -66,8 +64,6 @@ function pickFirstId(...values) {
     for (const v of values) {
         const id = extractId(v);
         if (!id) continue;
-        
-        // Blindagem na raiz: ignora qualquer ID lixo antes mesmo de processar
         const strId = String(id).toLowerCase();
         if (strId.includes('@lid') || strId.includes('@tampa') || strId.includes('status@')) {
             continue;
@@ -311,19 +307,10 @@ app.post('/webhook', async (req, res) => {
     try {
         const body = req.body || {};
         const data = getPayloadData(body);
-        if (DEBUG_WEBHOOK) {
-            try {
-                const raw = JSON.stringify(body, null, 2);
-                const truncated = raw.length > 8000 ? raw.slice(0, 8000) + "\n...<truncated>" : raw;
-                console.log("🧭 WEBHOOK RAW:", truncated);
-            } catch (e) {
-                console.log("🧭 WEBHOOK RAW: <erro ao serializar>");
-            }
-        }
 
         const eventType = getEventType(body);
         const eventUpper = String(eventType || "").toUpperCase();
-        console.log(`[WEBHOOK] event=${eventUpper || 'UNKNOWN'}`);
+        console.log(`[WEBHOOK] evento=${eventUpper || 'UNKNOWN'}`);
 
         // === DEDUPLICAÇÃO POR MESSAGE ID ===
         const messageId = data?.key?.id || data?.id || body?.key?.id || body?.id || body?.data?.key?.id;
@@ -364,7 +351,6 @@ app.post('/webhook', async (req, res) => {
             return res.status(200).send('Status');
         }
 
-        // MUDANÇA PRINCIPAL: Prioridade máxima para remoteJid, que é onde a Evolution salva o número real.
         const senderRaw = pickFirstId(
             data?.key?.remoteJid,
             body?.key?.remoteJid,
@@ -450,7 +436,9 @@ app.post('/webhook', async (req, res) => {
         
         const messageText = getMessageText(body);
 
+        // LOG DE SEGURANÇA: Avisa por que abortou se não achar o texto ou o ID
         if (!chatId || !messageText) {
+            console.log('[WEBHOOK] ❌ Mensagem ignorada: Faltou chatId ou não tem texto.', { chatId, temTexto: Boolean(messageText) });
             return res.status(200).send('Ignorado');
         }
 
@@ -458,15 +446,15 @@ app.post('/webhook', async (req, res) => {
         const comando = texto.toLowerCase().split(" ")[0];
         const chatLimpo = (sender && !selfNumbers.has(sender)) ? sender : toDigits(chatId);
 
-        // --- TRAVA DE SEGURANÇA (MODO DE TESTE) ---
+        // LOG DE SEGURANÇA: Trava de teste
         if (MODO_TESTE && !fromMe && !NUMEROS_PERMITIDOS.includes(chatLimpo)) {
-            if (DEBUG_WEBHOOK) {
-                console.log(`[MODO TESTE] Mensagem de cliente ignorada: ${chatLimpo}`);
-            }
+            console.log(`[MODO TESTE] 🚧 Cliente bloqueado pela trava de teste: ${chatLimpo}`);
             return res.status(200).send('Ignorado (Modo Teste)');
         }
 
+        // LOG DE SEGURANÇA: Loop do bot
         if (!fromMe && chatLimpo && selfNumbers.has(chatLimpo)) {
+            console.log(`[WEBHOOK] 🔄 Mensagem ignorada: o bot tentou conversar consigo mesmo no número ${chatLimpo}`);
             return res.status(200).send('Ignorado (self)');
         }
         
@@ -507,6 +495,7 @@ app.post('/webhook', async (req, res) => {
 
         // --- ZONA DE PAUSA ---
         if (conversasPausadas.has(chatLimpo) || conversasPausadas.has(chatId)) {
+            console.log(`[WEBHOOK] ⏸️ Conversa ignorada porque está pausada: ${chatLimpo}`);
             return res.status(200).send('Pausado');
         }
 
