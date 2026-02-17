@@ -1,7 +1,7 @@
 ﻿const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '..', '.env'), override: true });
 const express = require('express');
-// Importamos tambÃ©m o clearHistory para limpar memÃ³ria quando der !pare ou !volte
+// Importamos também o clearHistory para limpar memória quando der !pare ou !volte
 const { getGroqResponse, clearHistory } = require('./services/ai'); 
 const { sendMessage } = require('./services/wapi');
 
@@ -33,7 +33,7 @@ const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "").toLowerCase() === 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.get('/', (req, res) => res.send('ðŸ¤– Bot com MemÃ³ria ON!'));
+app.get('/', (req, res) => res.send('🤖 Bot com Memória ON!'));
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
 
 function toDigits(value) {
@@ -135,7 +135,7 @@ function normalizeChatId(value) {
 function normalizeLid(value) {
     const raw = String(value || "");
     const base = raw.split(":")[0];
-    return base.endsWith("@lid") ? base : "";
+    return (base.endsWith("@lid") || base.endsWith("@tampa")) ? base : "";
 }
 
 function rememberLidMapping(lid, phone) {
@@ -179,8 +179,8 @@ function resolveBestPhoneId(...values) {
         const mapped = resolveLidToPhone(id);
         if (isLikelyPhoneDigits(mapped)) return mapped;
         const base = String(id).split(":")[0];
-        // @lid não é número de WhatsApp real (a menos que já esteja mapeado).
-        if (base.endsWith("@lid")) continue;
+        // @lid e @tampa não são números de WhatsApp reais.
+        if (base.endsWith("@lid") || base.endsWith("@tampa")) continue;
         // Se tiver sufixo, aceitar apenas IDs clássicos do WhatsApp.
         if (base.includes("@") && !base.endsWith("@s.whatsapp.net") && !base.endsWith("@c.us")) {
             continue;
@@ -235,7 +235,10 @@ function pickInboundChatId(candidates, selfNumbers) {
         const digits = toDigits(String(chosen).split(":")[0]);
 
         if (hasUnknownSuffix) {
-            if (!fallbackCandidate) fallbackCandidate = chosen;
+            // Prevenção extra: Não usar lid ou tampa nem como fallback
+            if (!fallbackCandidate && !base.endsWith("@lid") && !base.endsWith("@tampa")) {
+                fallbackCandidate = chosen;
+            }
             continue;
         }
 
@@ -296,7 +299,6 @@ function ehEcoDoBot(chaveChat, texto) {
     return false;
 }
 
-
 app.post('/webhook', async (req, res) => {
     try {
         const body = req.body || {};
@@ -305,9 +307,9 @@ app.post('/webhook', async (req, res) => {
             try {
                 const raw = JSON.stringify(body, null, 2);
                 const truncated = raw.length > 8000 ? raw.slice(0, 8000) + "\n...<truncated>" : raw;
-                console.log("ðŸ§¾ WEBHOOK RAW:", truncated);
+                console.log("🧭 WEBHOOK RAW:", truncated);
             } catch (e) {
-                console.log("ðŸ§¾ WEBHOOK RAW: <erro ao serializar>");
+                console.log("🧭 WEBHOOK RAW: <erro ao serializar>");
             }
         }
 
@@ -344,7 +346,7 @@ app.post('/webhook', async (req, res) => {
                 const statusMessageId = body.messageId || body.id || body.data?.messageId || body.data?.id;
                 const knownBot = isMensagemBotId(statusMessageId);
                 if (DEBUG_WEBHOOK) {
-                    console.log("ðŸ§¾ STATUS META:", {
+                    console.log("🧭 STATUS META:", {
                         statusMessageId,
                         statusChatId,
                         mappedPhone,
@@ -511,7 +513,7 @@ app.post('/webhook', async (req, res) => {
 
         const texto = messageText.trim();
         const comando = texto.toLowerCase().split(" ")[0];
-        const chatLimpo = (sender && !selfNumbers.has(sender)) ? sender : toDigits(chatId); // ID da conversa para memÃ³ria
+        const chatLimpo = (sender && !selfNumbers.has(sender)) ? sender : toDigits(chatId); // ID da conversa para memória
 
         // Proteção: nunca responder para o próprio número do bot.
         if (!fromMe && chatLimpo && selfNumbers.has(chatLimpo)) {
@@ -525,7 +527,7 @@ app.post('/webhook', async (req, res) => {
         rememberLidMapping(body.chat?.id, chatId);
         rememberLidMapping(data.key?.remoteJid, chatId);
         if (DEBUG_WEBHOOK) {
-            console.log("ðŸ§¾ WEBHOOK META:", {
+            console.log("🧭 WEBHOOK META:", {
                 fromMe,
                 adminMatch,
                 senderRaw,
@@ -542,7 +544,7 @@ app.post('/webhook', async (req, res) => {
             });
         }
         if (fromMe) {
-            console.log("ðŸ§­ ASSUMIU? META:", {
+            console.log("📍 ASSUMIU? META:", {
                 fromMe,
                 adminMatch,
                 senderRaw,
@@ -568,11 +570,11 @@ app.post('/webhook', async (req, res) => {
                     conversasPausadas.add(alvoLimpo + "@c.us");
                     conversasPausadas.add(alvoLimpo + "@s.whatsapp.net");
                     
-                    // Limpa a memÃ³ria da IA para quando voltar, voltar "zerado" ou manter, vocÃª decide.
+                    // Limpa a memória da IA para quando voltar, voltar "zerado" ou manter, você decide.
                     // clearHistory(alvoLimpo); 
                     
-                    console.log(`ðŸ›‘ ADMIN PAUSOU: ${alvoLimpo}`);
-                    await sendMessage(chatId, `ðŸ›‘ Bot pausado para ${alvoLimpo}.`);
+                    console.log(`🛑 ADMIN PAUSOU: ${alvoLimpo}`);
+                    await sendMessage(chatId, `🛑 Bot pausado para ${alvoLimpo}.`);
                 }
                 return res.status(200).send('Admin');
             }
@@ -585,11 +587,11 @@ app.post('/webhook', async (req, res) => {
                     conversasPausadas.delete(alvoLimpo + "@c.us");
                     conversasPausadas.delete(alvoLimpo + "@s.whatsapp.net");
                     
-                    // Limpa memÃ³ria para comeÃ§ar conversa nova limpa
+                    // Limpa memória para começar conversa nova limpa
                     clearHistory(alvoLimpo); 
 
-                    console.log(`ðŸŸ¢ ADMIN REATIVOU: ${alvoLimpo}`);
-                    await sendMessage(chatId, `ðŸŸ¢ Bot reativado para ${alvoLimpo}.`);
+                    console.log(`🟢 ADMIN REATIVOU: ${alvoLimpo}`);
+                    await sendMessage(chatId, `🟢 Bot reativado para ${alvoLimpo}.`);
                 }
                 return res.status(200).send('Admin');
             }
@@ -620,15 +622,17 @@ app.post('/webhook', async (req, res) => {
             }
         }
 
-        // --- ZONA DA IA (AGORA COM MEMÃ“RIA) ---
-        console.log(`âœ… Cliente ${chatLimpo} disse: "${messageText}"`);
+        // --- ZONA DA IA (AGORA COM MEMÓRIA) ---
+        console.log(`✅ Cliente ${chatLimpo} disse: "${messageText}"`);
 
-        // MUDANÃ‡A AQUI: Passamos o chatLimpo (ID do cliente) para a memÃ³ria funcionar
+        // MUDANÇA AQUI: Passamos o chatLimpo (ID do cliente) para a memória funcionar
         const aiResponse = await getGroqResponse(messageText, chatLimpo);
         
-        console.log(`ðŸ§  IA: ${aiResponse}`);
+        console.log(`🧠 IA: ${aiResponse}`);
         registrarEnvioBot(chatLimpo, aiResponse);
         registrarEnvioBot(chatId, aiResponse);
+        
+        // MUDANÇA AQUI: Filtragem agressiva para remover IDs de status, lid e tampa
         const replyTargets = [
             chatId,
             data.key?.remoteJid,
@@ -641,9 +645,17 @@ app.post('/webhook', async (req, res) => {
             data.sender?.phone,
             senderRaw
         ].filter(Boolean).filter((target) => {
-            const d = toDigits(String(target).split(":")[0]);
+            const strTarget = String(target).toLowerCase();
+            
+            // Rejeita explicitamente IDs lixos do WhatsApp
+            if (strTarget.includes('@lid') || strTarget.includes('@tampa') || strTarget.includes('@broadcast') || strTarget.includes('status@')) {
+                return false;
+            }
+            
+            const d = toDigits(strTarget.split(":")[0]);
             return !d || !selfNumbers.has(d);
         });
+
         const sendResult = await sendMessage(replyTargets, aiResponse);
         const sentMessageId =
             sendResult?.key?.id ||
@@ -657,12 +669,12 @@ app.post('/webhook', async (req, res) => {
         res.status(200).send('OK');
 
     } catch (error) {
-        console.error('âŒ Erro:', error);
+        console.error('❌ Erro:', error);
         res.status(200).send('Erro');
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`ðŸš€ Servidor rodando na porta ${PORT}`);
-    console.log(`ðŸ§  MemÃ³ria ativada para conversas contÃ­nuas.`);
+    console.log(`🚀 Servidor rodando na porta ${PORT}`);
+    console.log(`🧠 Memória ativada para conversas contínuas.`);
 });

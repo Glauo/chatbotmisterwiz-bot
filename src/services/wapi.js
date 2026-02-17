@@ -59,18 +59,26 @@ function buildNumberCandidates(value) {
     const raw = String(value || '').trim();
     if (!raw) return [];
 
-    const base = raw.split(':')[0].trim();
-    const hasJid = base.includes('@');
-    const digits = base.replace(/\D/g, '');
+    // Keep raw JID (including device :XX) when present.
+    // In some events, removing this suffix makes destination invalid.
+    const rawNoParams = raw.split('/')[0].trim();
+    const jidMatch = rawNoParams.match(/^([^:@]+)(?::\d+)?(@.+)$/);
+    const normalizedJid = jidMatch ? `${jidMatch[1]}${jidMatch[2]}` : rawNoParams;
+    const hasRawJid = rawNoParams.includes('@');
+    const hasNormalizedJid = normalizedJid.includes('@');
+    const digits = (jidMatch ? jidMatch[1] : normalizedJid).replace(/\D/g, '');
 
     const candidates = [];
-    if (hasJid) {
-        // Mantém qualquer JID recebido no webhook (@s.whatsapp.net, @c.us, @lid, etc.)
-        candidates.push(base);
+    if (hasRawJid) {
+        candidates.push(rawNoParams);
+    }
+    if (hasNormalizedJid && normalizedJid !== rawNoParams) {
+        candidates.push(normalizedJid);
     }
     if (digits) {
         candidates.push(digits);
         candidates.push(`${digits}@s.whatsapp.net`);
+        candidates.push(`${digits}@c.us`);
     }
 
     return unique(candidates);
