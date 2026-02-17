@@ -18,48 +18,21 @@ const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 
 const NUMERO_ADMIN = "5516993804499"; 
 
-const BOT_SELF_NUMBER = toDigits(
+const BOT_SELF_NUMBER = String(
     process.env.BOT_SELF_NUMBER ||
     process.env.WHATSAPP_BOT_NUMBER ||
     process.env.INSTANCE_PHONE ||
     process.env.OWNER_NUMBER ||
     ""
-);
+).replace(/\D/g, "");
 
 const PAUSA_AUTOMATICA_ADMIN_ONLY = String(process.env.PAUSA_AUTOMATICA_ADMIN_ONLY || "true").toLowerCase() !== "false";
-const AUTO_PAUSE_ON_STATUS = String(process.env.AUTO_PAUSE_ON_STATUS || "").toLowerCase() === "true";
-const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "true").toLowerCase() === "true"; 
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.get('/', (req, res) => res.send('🤖 Bot com Memória ON!'));
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
-
-function toDigits(value) {
-    return String(value || "").replace(/\D/g, "");
-}
-
-// ==========================================
-// MÁQUINA DE RAIO-X: Caça números de telefone
-// ==========================================
-function collectPhoneCandidatesFromPayload(payload, out = []) {
-    if (payload == null) return out;
-    if (typeof payload === "string" || typeof payload === "number") {
-        const v = String(payload).trim();
-        const digits = v.replace(/\D/g, "");
-        // Números de WhatsApp têm entre 10 e 18 dígitos
-        if (digits.length >= 10 && digits.length <= 18) {
-            out.push(digits);
-        }
-        return out;
-    }
-    if (typeof payload !== "object") return out;
-    for (const value of Object.values(payload)) {
-        collectPhoneCandidatesFromPayload(value, out);
-    }
-    return out;
-}
 
 function getMessageText(body) {
     if (!body || typeof body !== "object") return "";
@@ -99,15 +72,6 @@ function pauseChat(chatId) {
     conversasPausadas.add(chatId);
 }
 
-function isMensagemBotId(id) {
-    if (!id) return false;
-    const now = Date.now();
-    for (const [mid, ts] of mensagensBotIds.entries()) {
-        if (now - ts > BOT_MSG_ID_TTL_MS) mensagensBotIds.delete(mid);
-    }
-    return mensagensBotIds.has(String(id));
-}
-
 function registrarEnvioBot(chaveChat, texto) {
     if (!chaveChat || !texto) return;
     ultimosEnviosBot.set(chaveChat, { texto: texto.trim(), ts: Date.now() });
@@ -124,18 +88,10 @@ function ehEcoDoBot(chaveChat, texto) {
     return false;
 }
 
-// ==========================================
-// ROTA PRINCIPAL DO WEBHOOK
-// ==========================================
 app.post('/webhook', async (req, res) => {
     try {
         const body = req.body || {};
         const data = body.data || body;
-
-        // Se der problema, isso vai imprimir o JSON inteiro para descobrirmos onde o número está
-        if (DEBUG_WEBHOOK) {
-            console.log("🧭 WEBHOOK RAW:", JSON.stringify(body).slice(0, 3000));
-        }
 
         // Deduplicação de Mensagem
         const messageId = data?.key?.id || data?.id || body?.key?.id || body?.id || body?.data?.key?.id;
@@ -152,52 +108,43 @@ app.post('/webhook', async (req, res) => {
 
         const fromMe = truthyFlag(body.fromMe) || truthyFlag(body.key?.fromMe) || truthyFlag(data.fromMe) || truthyFlag(data.key?.fromMe);
 
-        // 1. Identificar quem é o bot para não falar sozinho
-        const selfNumbers = new Set();
-        if (BOT_SELF_NUMBER) selfNumbers.add(BOT_SELF_NUMBER);
-        [body?.instance?.owner, body?.instance?.number, body?.me?.phone].forEach(h => {
-            const d = toDigits(h);
-            if (d && d.length >= 10) selfNumbers.add(d);
-        });
-
-        // 2. Extrair TODOS os possíveis números do webhook
-        let allCandidates = [];
-        collectPhoneCandidatesFromPayload(body, allCandidates);
-        allCandidates = [...new Set(allCandidates)];
+        // EXTRAÇÃO DIRETA E OFICIAL DO NÚMERO
+        let rawJid = data?.key?.remoteJid || body?.key?.remoteJid || data?.remoteJid || body?.remoteJid || body?.sender?.id;
         
-        // 3. Filtrar lixo e o próprio número do bot
-        allCandidates = allCandidates.filter(num => {
-            if (selfNumbers.has(num) && !fromMe) return false;
-            if (/^17[0-3]\d{10}$/.test(num)) return false; // Ignora timestamps disfarçados de telefone
-            return true;
-        });
+        if (!rawJid || typeof rawJid !== 'string') {
+            return res.status(200).send('Ignorado (Sem JID)');
+        }
 
-        // 4. ORDENAÇÃO INTELIGENTE (O Segredo do Sucesso)
-        allCandidates.sort((a, b) => {
-            const aBR = a.startsWith('55');
-            const bBR = b.startsWith('55');
-            if (aBR && !bBR) return -1; // Joga números brasileiros pro topo!
-            if (!aBR && bBR) return 1;
-            
-            const aLid = a.startsWith('30') || a.startsWith('49') || a.startsWith('1203');
-            const bLid = b.startsWith('30') || b.startsWith('49') || b.startsWith('1203');
-            if (!aLid && bLid) return -1; // Rebaixa IDs internos
-            if (aLid && !bLid) return 1;
-            
-            return 0;
-        });
+        // Ignora status e grupos
+        if (rawJid.includes('@broadcast') || rawJid.includes('status@') || rawJid.includes('@g.us')) {
+            return res.status(200).send('Ignorado (Broadcast/Grupo)');
+        }
 
-        // O melhor número vence!
-        const chatLimpo = allCandidates[0]; 
+        // Se a API mandar o ID interno (@lid), tentamos pegar o número real no participant
+        if (rawJid.includes('@lid') || rawJid.includes('@tampa')) {
+             const participant = data?.key?.participant || body?.key?.participant;
+             if (participant && participant.includes('@s.whatsapp.net')) {
+                 rawJid = participant;
+             }
+        }
+
+        // Limpa tudo, deixando apenas os números do cliente final
+        const chatLimpo = rawJid.split('@')[0].replace(/\D/g, "");
+
         const messageText = getMessageText(body);
 
         if (!chatLimpo || !messageText) {
-            return res.status(200).send('Ignorado');
+            return res.status(200).send('Ignorado (Falta dados)');
+        }
+
+        // Evita que o bot responda a si mesmo
+        if (!fromMe && BOT_SELF_NUMBER && chatLimpo === BOT_SELF_NUMBER) {
+            return res.status(200).send('Ignorado (Self)');
         }
 
         const texto = messageText.trim();
         const comando = texto.toLowerCase().split(" ")[0];
-        const adminMatch = allCandidates.includes(NUMERO_ADMIN);
+        const adminMatch = (chatLimpo === NUMERO_ADMIN);
 
         // --- ZONA DE COMANDO (Admin) ---
         if (adminMatch) {
@@ -248,7 +195,7 @@ app.post('/webhook', async (req, res) => {
         console.log(`🧠 IA: ${aiResponse}`);
         registrarEnvioBot(chatLimpo, aiResponse);
         
-        // Passamos APENAS o número limpo e correto, sem LIDs!
+        // Passamos APENAS o número limpo exato extraído do remoteJid
         const sendResult = await sendMessage([chatLimpo], aiResponse);
         
         const sentMessageId = sendResult?.key?.id || sendResult?.data?.key?.id || sendResult?.messageId || sendResult?.id;
