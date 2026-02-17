@@ -26,7 +26,6 @@ const BOT_SELF_NUMBER = String(
     ""
 ).replace(/\D/g, "");
 
-// Mantemos o padrão ativado para pausar sozinho quando um humano assume
 const PAUSA_AUTOMATICA_ADMIN_ONLY = String(process.env.PAUSA_AUTOMATICA_ADMIN_ONLY || "true").toLowerCase() !== "false";
 const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "true").toLowerCase() === "true"; 
 
@@ -114,11 +113,13 @@ app.post('/webhook', async (req, res) => {
         let rawJid = data?.key?.remoteJid || body?.key?.remoteJid || data?.remoteJid || body?.remoteJid || body?.sender?.id;
         
         if (!rawJid || typeof rawJid !== 'string') {
+            console.log(`🛑 Abortado: Não encontrei nenhum ID de remetente no Webhook.`);
             return res.status(200).send('Ignorado (Sem JID)');
         }
 
         // Ignora status e grupos
         if (rawJid.includes('@broadcast') || rawJid.includes('status@') || rawJid.includes('@g.us')) {
+            console.log(`🛑 Abortado: Mensagem ignorada por ser Status ou de Grupo.`);
             return res.status(200).send('Ignorado (Broadcast/Grupo)');
         }
 
@@ -146,16 +147,18 @@ app.post('/webhook', async (req, res) => {
 
         // Limpa tudo, deixando apenas os números do cliente final
         const chatLimpo = rawJid.split('@')[0].replace(/\D/g, "");
-
         const messageText = getMessageText(body);
 
-        // Se for áudio, foto sem legenda ou vazio, ignora em silêncio.
+        console.log(`🔎 Analisando nova mensagem de: ${chatLimpo} | Texto capturado: "${messageText}" | fromMe: ${fromMe}`);
+
         if (!chatLimpo || !messageText) {
+            console.log(`🛑 Abortado: A mensagem não tem texto escrito ou o remetente está vazio (Pode ser um áudio/imagem sem legenda).`);
             return res.status(200).send('Ignorado (Falta dados ou eh midia)');
         }
 
-        // Evita que o bot responda ao próprio número de instância (Self)
+        // Evita que o bot responda ao próprio número
         if (!fromMe && BOT_SELF_NUMBER && chatLimpo === BOT_SELF_NUMBER) {
+            console.log(`🛑 Abortado: O bot tentou conversar consigo mesmo e foi bloqueado por segurança.`);
             return res.status(200).send('Ignorado (Self)');
         }
 
@@ -170,7 +173,7 @@ app.post('/webhook', async (req, res) => {
                 if (alvo) {
                     const alvoLimpo = alvo.replace(/\D/g, "");
                     conversasPausadas.add(alvoLimpo); 
-                    console.log(`🛑 ADMIN PAUSOU: ${alvoLimpo}`);
+                    console.log(`🛑 ADMIN PAUSOU O BOT PARA O NÚMERO: ${alvoLimpo}`);
                     await sendMessage(chatLimpo, `🛑 Bot pausado para ${alvoLimpo}.`);
                 }
                 return res.status(200).send('Admin');
@@ -182,44 +185,41 @@ app.post('/webhook', async (req, res) => {
                     const alvoLimpo = alvo.replace(/\D/g, "");
                     conversasPausadas.delete(alvoLimpo);
                     clearHistory(alvoLimpo); 
-                    console.log(`🟢 ADMIN REATIVOU: ${alvoLimpo}`);
+                    console.log(`🟢 ADMIN REATIVOU O BOT PARA O NÚMERO: ${alvoLimpo}`);
                     await sendMessage(chatLimpo, `🟢 Bot reativado para ${alvoLimpo}.`);
                 }
                 return res.status(200).send('Admin');
             }
         }
 
-        // --- ZONA DE PAUSA E ECO ---
+        // --- ZONA DE PAUSA ---
         if (conversasPausadas.has(chatLimpo)) {
+            console.log(`🛑 Abortado: A conversa com ${chatLimpo} está pausada pelo administrador.`);
             return res.status(200).send('Pausado');
         }
 
-        // ==========================================
-        // 🛑 CORREÇÃO AQUI: PARADA ABSOLUTA PARA MENSAGENS "fromMe"
-        // ==========================================
         if (fromMe) {
             if (ehEcoDoBot(chatLimpo, messageText)) {
+                console.log(`🛑 Abortado: Era apenas o eco da própria IA respondendo.`);
                 return res.status(200).send('Ignorado (eco do bot)');
             }
             
             // Se o humano mandou mensagem, pausa o bot imediatamente
             pauseChat(chatLimpo);
             clearHistory(chatLimpo);
-            console.log(`🛑 PAUSA AUTOMATICA (HUMANO ASSUMIU): O bot não vai mais responder o cliente ${chatLimpo}`);
-            
-            // ESSENCIAL: Interrompe a execução aqui para a IA não responder a sua própria mensagem!
+            console.log(`🛑 PAUSA AUTOMATICA: O atendente humano assumiu a conversa. O bot ficará mudo com ${chatLimpo}`);
             return res.status(200).send('Ignorado (Mensagem do proprio dono)');
         }
 
         // --- ZONA DA IA ---
-        console.log(`✅ Cliente ${chatLimpo} disse: "${messageText}"`);
+        console.log(`✅ Cliente ${chatLimpo} diz: "${messageText}" -> Enviando para a Inteligência Artificial...`);
 
         const aiResponse = await getGroqResponse(messageText, chatLimpo);
         
-        console.log(`🧠 IA: ${aiResponse}`);
+        console.log(`🧠 IA Respondeu: ${aiResponse}`);
         registrarEnvioBot(chatLimpo, aiResponse);
         
-        // Passamos o número limpo exato
+        console.log(`🚀 Solicitando envio para a API Evolution com destino: ${chatLimpo}`);
         const sendResult = await sendMessage([chatLimpo], aiResponse);
         
         const sentMessageId = sendResult?.key?.id || sendResult?.data?.key?.id || sendResult?.messageId || sendResult?.id;
@@ -230,7 +230,7 @@ app.post('/webhook', async (req, res) => {
         res.status(200).send('OK');
 
     } catch (error) {
-        console.error('❌ Erro:', error);
+        console.error('❌ ERRO FATAL no processamento do Webhook:', error);
         res.status(200).send('Erro');
     }
 });
