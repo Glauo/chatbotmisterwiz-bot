@@ -27,6 +27,7 @@ const BOT_SELF_NUMBER = String(
 ).replace(/\D/g, "");
 
 const PAUSA_AUTOMATICA_ADMIN_ONLY = String(process.env.PAUSA_AUTOMATICA_ADMIN_ONLY || "true").toLowerCase() !== "false";
+const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "true").toLowerCase() === "true"; 
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -93,6 +94,13 @@ app.post('/webhook', async (req, res) => {
         const body = req.body || {};
         const data = body.data || body;
 
+        // Se estiver ativado, mostra todo o pacote de dados no log
+        if (DEBUG_WEBHOOK) {
+            console.log("🧭 WEBHOOK RAW START ---");
+            console.log(JSON.stringify(body, null, 2).slice(0, 3000));
+            console.log("--- WEBHOOK RAW END 🧭");
+        }
+
         // Deduplicação de Mensagem
         const messageId = data?.key?.id || data?.id || body?.key?.id || body?.id || body?.data?.key?.id;
         if (messageId) {
@@ -108,7 +116,7 @@ app.post('/webhook', async (req, res) => {
 
         const fromMe = truthyFlag(body.fromMe) || truthyFlag(body.key?.fromMe) || truthyFlag(data.fromMe) || truthyFlag(data.key?.fromMe);
 
-        // EXTRAÇÃO DIRETA E OFICIAL DO NÚMERO
+        // EXTRAÇÃO OFICIAL
         let rawJid = data?.key?.remoteJid || body?.key?.remoteJid || data?.remoteJid || body?.remoteJid || body?.sender?.id;
         
         if (!rawJid || typeof rawJid !== 'string') {
@@ -120,12 +128,27 @@ app.post('/webhook', async (req, res) => {
             return res.status(200).send('Ignorado (Broadcast/Grupo)');
         }
 
-        // Se a API mandar o ID interno (@lid), tentamos pegar o número real no participant
-        if (rawJid.includes('@lid') || rawJid.includes('@tampa')) {
-             const participant = data?.key?.participant || body?.key?.participant;
-             if (participant && participant.includes('@s.whatsapp.net')) {
-                 rawJid = participant;
-             }
+        // ==========================================
+        // 🎭 FUNÇÃO ANTI-MÁSCARA: Desvia de IDs @lid
+        // ==========================================
+        if (rawJid.includes('@lid') || rawJid.includes('@tampa') || !rawJid.includes('@')) {
+            // Se o remetente oficial for uma máscara, procuramos o número real em outras "gavetas"
+            const backupFields = [
+                data?.key?.participant,
+                body?.key?.participant,
+                data?.sender,
+                body?.sender,
+                data?.participant,
+                body?.participant
+            ];
+
+            for (const field of backupFields) {
+                if (field && typeof field === 'string' && field.includes('@s.whatsapp.net') && !field.includes('@lid')) {
+                    console.log(`🎭 MÁSCARA DETECTADA! Trocando LID (${rawJid}) pelo número real (${field})`);
+                    rawJid = field;
+                    break; // Achou o número real, para de procurar
+                }
+            }
         }
 
         // Limpa tudo, deixando apenas os números do cliente final
@@ -195,7 +218,7 @@ app.post('/webhook', async (req, res) => {
         console.log(`🧠 IA: ${aiResponse}`);
         registrarEnvioBot(chatLimpo, aiResponse);
         
-        // Passamos APENAS o número limpo exato extraído do remoteJid
+        // Passamos o número limpo exato
         const sendResult = await sendMessage([chatLimpo], aiResponse);
         
         const sentMessageId = sendResult?.key?.id || sendResult?.data?.key?.id || sendResult?.messageId || sendResult?.id;
