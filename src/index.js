@@ -17,9 +17,9 @@ const DEDUP_TTL_MS = 60 * 1000; // 60 segundos de janela de deduplicação
 const BOT_ECHO_WINDOW_MS = 15000;
 const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 
-const NUMERO_ADMIN = "5516993804499"; 
-const MODO_TESTE = true; // Mude para false para o bot atender todo mundo
-const NUMEROS_PERMITIDOS = ["5516997237745", NUMERO_ADMIN]; // Números que o bot vai responder agora
+const NUMERO_ADMIN = "5516996043314"; 
+const MODO_FALSE = true; // Mude para false para o bot atender todo mundo
+const NUMEROS_PERMITIDOS = ["5516993804499", NUMERO_ADMIN]; // Números que o bot vai responder agora
 
 const BOT_SELF_NUMBER = toDigits(
     process.env.BOT_SELF_NUMBER ||
