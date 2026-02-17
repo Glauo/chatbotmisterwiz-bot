@@ -469,7 +469,7 @@ app.post('/webhook', async (req, res) => {
 
         const texto = messageText.trim();
         const comando = texto.toLowerCase().split(" ")[0];
-        const chatLimpo = toDigits(chatId); // ID limpo para usar na memÃ³ria
+        const chatLimpo = (sender && !selfNumbers.has(sender)) ? sender : toDigits(chatId); // ID da conversa para memÃ³ria
 
         // Proteção: nunca responder para o próprio número do bot.
         if (!fromMe && chatLimpo && selfNumbers.has(chatLimpo)) {
@@ -588,7 +588,22 @@ app.post('/webhook', async (req, res) => {
         console.log(`ðŸ§  IA: ${aiResponse}`);
         registrarEnvioBot(chatLimpo, aiResponse);
         registrarEnvioBot(chatId, aiResponse);
-        const sendResult = await sendMessage(chatId, aiResponse);
+        const replyTargets = [
+            chatId,
+            data.key?.remoteJid,
+            body.key?.remoteJid,
+            body.from,
+            body.phone,
+            body.sender?.id,
+            body.sender?.phone,
+            data.sender?.id,
+            data.sender?.phone,
+            senderRaw
+        ].filter(Boolean).filter((target) => {
+            const d = toDigits(String(target).split(":")[0]);
+            return !d || !selfNumbers.has(d);
+        });
+        const sendResult = await sendMessage(replyTargets, aiResponse);
         const sentMessageId =
             sendResult?.key?.id ||
             sendResult?.data?.key?.id ||

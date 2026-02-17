@@ -43,6 +43,36 @@ function cleanNumber(value) {
     return base.replace(/\D/g, '');
 }
 
+function unique(values) {
+    const out = [];
+    const seen = new Set();
+    for (const value of values) {
+        const key = String(value || '').trim();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(key);
+    }
+    return out;
+}
+
+function buildNumberCandidates(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return [];
+
+    const base = raw.split(':')[0].trim();
+    const hasJid = base.includes('@');
+    const digits = base.replace(/\D/g, '');
+
+    const candidates = [];
+    if (hasJid) candidates.push(base); // preserva @lid / @s.whatsapp.net / @c.us
+    if (digits) {
+        candidates.push(digits);
+        candidates.push(`${digits}@s.whatsapp.net`);
+    }
+
+    return unique(candidates);
+}
+
 function buildEvolutionUrl() {
     const base = String(EVOLUTION_API_URL || '').replace(/\/+$/, '');
     const instance = encodeURIComponent(String(EVOLUTION_INSTANCE || ''));
@@ -58,8 +88,9 @@ async function sendMessage(phone, message) {
         }
 
         const url = buildEvolutionUrl();
-        const number = cleanNumber(phone);
-        if (!number) {
+        const sourceList = Array.isArray(phone) ? phone : [phone];
+        const candidates = unique(sourceList.flatMap(buildNumberCandidates));
+        if (!candidates.length) {
             console.error('Invalid number for send:', phone);
             return;
         }
@@ -71,9 +102,7 @@ async function sendMessage(phone, message) {
             }
         };
 
-        // Algumas instalações aceitam apenas dígitos; outras aceitam JID com sufixo.
-        // Tenta primeiro com dígitos (padrão mais estável) e, se falhar 400, tenta JID.
-        const candidates = [number, `${number}@s.whatsapp.net`];
+        // Tenta múltiplos formatos/destinos (inclui JID bruto quando existir).
         let lastError = null;
 
         for (const candidate of candidates) {
