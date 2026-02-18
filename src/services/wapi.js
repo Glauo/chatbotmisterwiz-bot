@@ -3,7 +3,6 @@ require('dotenv').config();
 
 const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || '').toLowerCase() === 'true';
 
-// Variáveis da W-API que você vai cadastrar na Railway
 const WAPI_URL = process.env.WAPI_URL || '';
 const WAPI_TOKEN = process.env.WAPI_TOKEN || '';
 
@@ -15,19 +14,15 @@ function cleanNumber(value) {
 async function sendMessage(phone, message) {
     try {
         if (!WAPI_URL || !WAPI_TOKEN) {
-            console.error('❌ W-API não configurada. Faltam as variáveis WAPI_URL ou WAPI_TOKEN na Railway.');
+            console.error('❌ W-API não configurada. Faltam as variáveis WAPI_URL ou WAPI_TOKEN.');
             return;
         }
 
         const destinations = Array.isArray(phone) ? phone : [phone];
         const cleanDestinations = destinations.map(cleanNumber).filter(Boolean);
 
-        if (!cleanDestinations.length) {
-            console.error('❌ Número inválido para envio:', phone);
-            return;
-        }
+        if (!cleanDestinations.length) return;
 
-        // A maioria das W-APIs usa Bearer Token
         const config = {
             headers: {
                 'Authorization': `Bearer ${WAPI_TOKEN}`,
@@ -37,18 +32,20 @@ async function sendMessage(phone, message) {
 
         for (const numero of cleanDestinations) {
             try {
-                console.log(`🚀 Enviando via W-API para ${numero}...`);
+                console.log(`🚀 Enviando via W-API para ${numero}... | URL Exata: ${WAPI_URL}`);
                 
-                // Formato de disparo padrão da W-API
+                // Enviamos nos dois formatos mais comuns de APIs ao mesmo tempo para blindar contra o erro 400!
                 const payload = {
                     phone: numero,
-                    message: message
+                    message: message,
+                    number: numero,
+                    text: message
                 };
 
                 const response = await axios.post(WAPI_URL, payload, config);
                 
                 if (DEBUG_WEBHOOK) console.log('✅ W-API Respondeu:', JSON.stringify(response.data));
-                console.log('✅ Mensagem enviada com sucesso pela W-API.');
+                console.log('✅ Mensagem entregue com sucesso pela W-API!');
                 return response.data;
             } catch (error) {
                 console.error(`❌ Erro no envio para ${numero} pela W-API:`);
