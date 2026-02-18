@@ -94,7 +94,11 @@ app.post('/webhook', async (req, res) => {
         const body = req.body || {};
         const data = body.data || body;
 
-        // Imprime o formato exato que a API mandou para monitorarmos
+        // 1. BLOQUEIO SILENCIOSO: Ignora recibos de leitura e entrega (limpa o terminal)
+        if (body.event === 'webhookStatus' || body.status || data.event === 'webhookStatus') {
+            return res.status(200).send('Ignorado (Status de entrega/leitura)');
+        }
+
         if (DEBUG_WEBHOOK) {
             console.log("🧭 WEBHOOK RAW START ---");
             console.log(JSON.stringify(body, null, 2).slice(0, 3000));
@@ -116,20 +120,18 @@ app.post('/webhook', async (req, res) => {
 
         const fromMe = truthyFlag(body.fromMe) || truthyFlag(body.key?.fromMe) || truthyFlag(data.fromMe) || truthyFlag(data.key?.fromMe);
 
-        // Extrator Universal de JID (Funciona para W-API, Z-API, Evolution, Baileys...)
+        // Extrator de JID
         let rawJid = data?.key?.remoteJid || body?.key?.remoteJid || data?.remoteJid || body?.remoteJid || body?.sender?.id || body?.phone || body?.from || data?.from;
         
         if (!rawJid || typeof rawJid !== 'string') {
-            console.log(`🛑 Abortado: Não encontrei nenhum ID de remetente no Webhook.`);
             return res.status(200).send('Ignorado (Sem JID)');
         }
 
         if (rawJid.includes('@broadcast') || rawJid.includes('status@') || rawJid.includes('@g.us')) {
-            console.log(`🛑 Abortado: Mensagem ignorada por ser Status ou de Grupo.`);
             return res.status(200).send('Ignorado (Broadcast/Grupo)');
         }
 
-        // Anti-Máscara (Caso a W-API também mascare o número)
+        // Anti-Máscara
         if (rawJid.includes('@lid') || rawJid.includes('@tampa') || !rawJid.includes('@')) {
             const backupFields = [
                 data?.key?.participant, body?.key?.participant,
@@ -150,6 +152,20 @@ app.post('/webhook', async (req, res) => {
 
         console.log(`🔎 Nova mensagem de: ${chatLimpo} | Texto: "${messageText}" | fromMe: ${fromMe}`);
 
+        // --- ZONA DE PAUSA AUTOMÁTICA (HUMANO ASSUMIU) ---
+        // Agora vem ANTES de verificar se a mensagem tem texto!
+        if (fromMe) {
+            if (messageText && ehEcoDoBot(chatLimpo, messageText)) {
+                return res.status(200).send('Ignorado (eco do bot)');
+            }
+            // Se chegou aqui, foi você quem mandou a mensagem (texto, áudio, foto, etc)
+            pauseChat(chatLimpo);
+            clearHistory(chatLimpo);
+            console.log(`🛑 PAUSA AUTOMÁTICA: O atendente humano assumiu a conversa com ${chatLimpo}. O bot ficará mudo para este cliente.`);
+            return res.status(200).send('Ignorado (Mensagem do proprio dono)');
+        }
+
+        // Se o CLIENTE mandou algo sem texto (áudio, foto sem legenda), a IA ignora
         if (!chatLimpo || !messageText) {
             return res.status(200).send('Ignorado (Falta dados ou eh midia)');
         }
@@ -184,20 +200,10 @@ app.post('/webhook', async (req, res) => {
             }
         }
 
-        // --- ZONA DE PAUSA E HUMANO ---
+        // --- ZONA DE CHECAGEM DE PAUSA ---
         if (conversasPausadas.has(chatLimpo)) {
             console.log(`🛑 Abortado: A conversa com ${chatLimpo} está pausada pelo administrador.`);
             return res.status(200).send('Pausado');
-        }
-
-        if (fromMe) {
-            if (ehEcoDoBot(chatLimpo, messageText)) {
-                return res.status(200).send('Ignorado (eco do bot)');
-            }
-            pauseChat(chatLimpo);
-            clearHistory(chatLimpo);
-            console.log(`🛑 PAUSA AUTOMATICA: O atendente humano assumiu a conversa com ${chatLimpo}`);
-            return res.status(200).send('Ignorado (Mensagem do proprio dono)');
         }
 
         // --- ZONA DA IA ---
