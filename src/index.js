@@ -18,6 +18,14 @@ const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 
 const NUMERO_ADMIN = "5516993804499"; 
 
+const BOT_SELF_NUMBER = String(
+    process.env.BOT_SELF_NUMBER ||
+    process.env.WHATSAPP_BOT_NUMBER ||
+    process.env.INSTANCE_PHONE ||
+    process.env.OWNER_NUMBER ||
+    ""
+).replace(/\D/g, "");
+
 const PAUSA_AUTOMATICA_ADMIN_ONLY = String(process.env.PAUSA_AUTOMATICA_ADMIN_ONLY || "true").toLowerCase() !== "false";
 const DEBUG_WEBHOOK = String(process.env.DEBUG_WEBHOOK || "true").toLowerCase() === "true"; 
 
@@ -86,8 +94,15 @@ app.post('/webhook', async (req, res) => {
         const body = req.body || {};
         const data = body.data || body;
 
-        // Deduplicação de Mensagem
-        const messageId = data?.key?.id || data?.id || body?.key?.id || body?.id || body?.data?.key?.id;
+        // Imprime o formato exato que a API mandou para monitorarmos
+        if (DEBUG_WEBHOOK) {
+            console.log("🧭 WEBHOOK RAW START ---");
+            console.log(JSON.stringify(body, null, 2).slice(0, 3000));
+            console.log("--- WEBHOOK RAW END 🧭");
+        }
+
+        // Deduplicação
+        const messageId = data?.key?.id || data?.id || body?.key?.id || body?.id || body?.data?.key?.id || body?.messageId;
         if (messageId) {
             const now = Date.now();
             for (const [id, ts] of processedMessageIds.entries()) {
@@ -101,50 +116,41 @@ app.post('/webhook', async (req, res) => {
 
         const fromMe = truthyFlag(body.fromMe) || truthyFlag(body.key?.fromMe) || truthyFlag(data.fromMe) || truthyFlag(data.key?.fromMe);
 
-        // EXTRAÇÃO OFICIAL
-        let rawJid = data?.key?.remoteJid || body?.key?.remoteJid || data?.remoteJid || body?.remoteJid || body?.sender?.id;
+        // Extrator Universal de JID (Funciona para W-API, Z-API, Evolution, Baileys...)
+        let rawJid = data?.key?.remoteJid || body?.key?.remoteJid || data?.remoteJid || body?.remoteJid || body?.sender?.id || body?.phone || body?.from || data?.from;
         
         if (!rawJid || typeof rawJid !== 'string') {
             console.log(`🛑 Abortado: Não encontrei nenhum ID de remetente no Webhook.`);
             return res.status(200).send('Ignorado (Sem JID)');
         }
 
-        // Ignora status e grupos
         if (rawJid.includes('@broadcast') || rawJid.includes('status@') || rawJid.includes('@g.us')) {
             console.log(`🛑 Abortado: Mensagem ignorada por ser Status ou de Grupo.`);
             return res.status(200).send('Ignorado (Broadcast/Grupo)');
         }
 
-        // ==========================================
-        // 🎭 FUNÇÃO ANTI-MÁSCARA: Desvia de IDs @lid
-        // ==========================================
+        // Anti-Máscara (Caso a W-API também mascare o número)
         if (rawJid.includes('@lid') || rawJid.includes('@tampa') || !rawJid.includes('@')) {
             const backupFields = [
-                data?.key?.participant,
-                body?.key?.participant,
-                data?.sender,
-                body?.sender,
-                data?.participant,
-                body?.participant
+                data?.key?.participant, body?.key?.participant,
+                data?.sender, body?.sender,
+                data?.participant, body?.participant
             ];
-
             for (const field of backupFields) {
                 if (field && typeof field === 'string' && field.includes('@s.whatsapp.net') && !field.includes('@lid')) {
-                    console.log(`🎭 MÁSCARA DETECTADA! Trocando LID (${rawJid}) pelo número real (${field})`);
                     rawJid = field;
                     break;
                 }
             }
         }
 
-        // Limpa tudo, deixando apenas os números do cliente final
+        // Limpa o JID
         const chatLimpo = rawJid.split('@')[0].replace(/\D/g, "");
         const messageText = getMessageText(body);
 
-        console.log(`🔎 Analisando nova mensagem de: ${chatLimpo} | Texto capturado: "${messageText}" | fromMe: ${fromMe}`);
+        console.log(`🔎 Nova mensagem de: ${chatLimpo} | Texto: "${messageText}" | fromMe: ${fromMe}`);
 
         if (!chatLimpo || !messageText) {
-            console.log(`🛑 Abortado: A mensagem não tem texto escrito ou o remetente está vazio (Pode ser um áudio/imagem sem legenda).`);
             return res.status(200).send('Ignorado (Falta dados ou eh midia)');
         }
 
@@ -178,7 +184,7 @@ app.post('/webhook', async (req, res) => {
             }
         }
 
-        // --- ZONA DE PAUSA ---
+        // --- ZONA DE PAUSA E HUMANO ---
         if (conversasPausadas.has(chatLimpo)) {
             console.log(`🛑 Abortado: A conversa com ${chatLimpo} está pausada pelo administrador.`);
             return res.status(200).send('Pausado');
@@ -186,33 +192,25 @@ app.post('/webhook', async (req, res) => {
 
         if (fromMe) {
             if (ehEcoDoBot(chatLimpo, messageText)) {
-                console.log(`🛑 Abortado: Era apenas o eco da própria IA respondendo.`);
                 return res.status(200).send('Ignorado (eco do bot)');
             }
-            
-            // Se o humano mandou mensagem, pausa o bot imediatamente
             pauseChat(chatLimpo);
             clearHistory(chatLimpo);
-            console.log(`🛑 PAUSA AUTOMATICA: O atendente humano assumiu a conversa. O bot ficará mudo com ${chatLimpo}`);
+            console.log(`🛑 PAUSA AUTOMATICA: O atendente humano assumiu a conversa com ${chatLimpo}`);
             return res.status(200).send('Ignorado (Mensagem do proprio dono)');
         }
 
         // --- ZONA DA IA ---
-        console.log(`✅ Cliente ${chatLimpo} diz: "${messageText}" -> Enviando para a Inteligência Artificial...`);
+        console.log(`✅ Cliente ${chatLimpo} diz: "${messageText}" -> Enviando para a IA...`);
 
         const aiResponse = await getGroqResponse(messageText, chatLimpo);
         
         console.log(`🧠 IA Respondeu: ${aiResponse}`);
         registrarEnvioBot(chatLimpo, aiResponse);
         
-        console.log(`🚀 Solicitando envio para a API Evolution com destino: ${chatLimpo}`);
+        console.log(`🚀 Solicitando envio para a W-API com destino: ${chatLimpo}`);
         const sendResult = await sendMessage([chatLimpo], aiResponse);
         
-        const sentMessageId = sendResult?.key?.id || sendResult?.data?.key?.id || sendResult?.messageId || sendResult?.id;
-        if (sentMessageId) {
-            mensagensBotIds.set(String(sentMessageId), Date.now());
-        }
-
         res.status(200).send('OK');
 
     } catch (error) {
