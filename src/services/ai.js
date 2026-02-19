@@ -9,7 +9,8 @@ if (!MINHA_CHAVE_GROQ) {
 const groq = new Groq({ apiKey: MINHA_CHAVE_GROQ });
 
 // Memória da conversa
-const history = {}; 
+const history = {};
+const studentHistory = {};
 
 // ============================================================================
 // 🧠 CÉREBRO MISTER WIZ (Versão Alinhada: Valor, Retenção e Argumentos)
@@ -119,4 +120,75 @@ function clearHistory(userId) {
     }
 }
 
-module.exports = { getGroqResponse, clearHistory };
+async function getStudentSupportResponse(userMessage, userId, context = {}) {
+    const text = String(userMessage || '').trim();
+    if (!text) {
+        return 'Me diga qual demanda voce precisa resolver agora na Active.';
+    }
+
+    if (!MINHA_CHAVE_GROQ) {
+        return [
+            'CPF confirmado.',
+            'Posso ajudar com financeiro, turmas, aulas, links, material ou outra solicitacao da Active.'
+        ].join(' ');
+    }
+
+    try {
+        if (!studentHistory[userId]) studentHistory[userId] = [];
+        studentHistory[userId].push({ role: 'user', content: text });
+
+        if (studentHistory[userId].length > 15) {
+            studentHistory[userId] = studentHistory[userId].slice(-15);
+        }
+
+        const completion = await groq.chat.completions.create({
+            model: 'llama-3.1-8b-instant',
+            temperature: 0.2,
+            max_tokens: 380,
+            messages: [
+                {
+                    role: 'system',
+                    content: [
+                        'Voce e Wiz IA no atendimento de alunos da Active.',
+                        'Sempre considere que o CPF ja foi confirmado.',
+                        'Atenda pedidos sobre financeiro, turmas, aulas, links, material e suporte escolar.',
+                        'Se faltar dado para executar, peca de forma objetiva.',
+                        'Seja curto e direto, sem discurso comercial.'
+                    ].join(' ')
+                },
+                {
+                    role: 'user',
+                    content: JSON.stringify({
+                        message: text,
+                        context
+                    })
+                },
+                ...studentHistory[userId]
+            ]
+        });
+
+        const response =
+            completion.choices[0]?.message?.content?.trim() ||
+            'Entendi. Vou te ajudar com isso agora. Pode me passar os dados que faltam?';
+
+        studentHistory[userId].push({ role: 'assistant', content: response });
+        return response;
+    } catch (error) {
+        console.error('Erro no suporte de aluno IA:', error.message || error);
+        studentHistory[userId] = [];
+        return 'Nao consegui concluir agora. Pode repetir sua solicitacao?';
+    }
+}
+
+function clearStudentHistory(userId) {
+    if (studentHistory[userId]) {
+        studentHistory[userId] = [];
+    }
+}
+
+module.exports = {
+    getGroqResponse,
+    clearHistory,
+    getStudentSupportResponse,
+    clearStudentHistory
+};

@@ -1,7 +1,13 @@
 ﻿const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '..', '.env'), override: true });
 const express = require('express');
-const { getGroqResponse, clearHistory } = require('./services/ai'); 
+// Importamos também o clearHistory para limpar memória quando der !pare ou !volte
+const {
+    getGroqResponse,
+    clearHistory,
+    getStudentSupportResponse,
+    clearStudentHistory
+} = require('./services/ai');
 const { sendMessage } = require('./services/wapi');
 
 const app = express();
@@ -10,9 +16,8 @@ const PORT = process.env.PORT || 8080;
 const conversasPausadas = new Set();
 const ultimosEnviosBot = new Map();
 const mensagensBotIds = new Map();
-const processedMessageIds = new Map(); 
-
-const DEDUP_TTL_MS = 60 * 1000; 
+const lidToPhone = new Map();
+const conversationStates = new Map();
 const BOT_ECHO_WINDOW_MS = 15000;
 const BOT_MSG_ID_TTL_MS = 5 * 60 * 1000;
 
@@ -89,6 +94,148 @@ function ehEcoDoBot(chaveChat, texto) {
     return false;
 }
 
+function normalizeText(value) {
+    return String(value || '')
+        .trim()
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+}
+
+function getConversationState(chatId) {
+    const current = conversationStates.get(chatId);
+    if (current) return current;
+    return {
+        stage: 'NEW',
+        cpf: '',
+        isStudent: null
+    };
+}
+
+function saveConversationState(chatId, state) {
+    if (!chatId || !state) return;
+    conversationStates.set(chatId, state);
+}
+
+function resetConversationState(chatId) {
+    if (!chatId) return;
+    conversationStates.delete(chatId);
+    clearHistory(chatId);
+    clearStudentHistory(chatId);
+}
+
+function extractCpf(text) {
+    const match = String(text || '').match(/(\d{3}\.?\d{3}\.?\d{3}-?\d{2})/);
+    if (!match) return '';
+    return String(match[1]).replace(/\D/g, '');
+}
+
+function removeCpfFromText(text) {
+    return String(text || '')
+        .replace(/(\d{3}\.?\d{3}\.?\d{3}-?\d{2})/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function isValidCPF(cpf) {
+    const digits = String(cpf || '').replace(/\D/g, '');
+    if (digits.length !== 11) return false;
+    if (/^(\d)\1{10}$/.test(digits)) return false;
+
+    const calc = (base, factor) => {
+        let total = 0;
+        for (const char of base) {
+            total += Number(char) * factor;
+            factor -= 1;
+        }
+        const remainder = total % 11;
+        return remainder < 2 ? 0 : 11 - remainder;
+    };
+
+    const d1 = calc(digits.slice(0, 9), 10);
+    const d2 = calc(digits.slice(0, 10), 11);
+    return digits.endsWith(`${d1}${d2}`);
+}
+
+function detectStudentStatus(text) {
+    const normalized = normalizeText(text);
+    if (!normalized) return 'unknown';
+
+    const directYes = ['sim', 's', 'yes', 'ja', 'já'];
+    const directNo = ['nao', 'não', 'n', 'no'];
+
+    if (directYes.includes(normalized)) return 'student';
+    if (directNo.includes(normalized)) return 'lead';
+
+    const noStudent = [
+        'nao sou aluno',
+        'não sou aluno',
+        'nao estudo',
+        'não estudo',
+        'quero me matricular',
+        'novo aluno',
+        'nao sou da escola',
+        'não sou da escola'
+    ];
+    const student = [
+        'sou aluno',
+        'ja sou aluno',
+        'já sou aluno',
+        'sou estudante',
+        'ja estudo',
+        'já estudo',
+        'aluno da active',
+        'estudo na active'
+    ];
+
+    if (noStudent.some((item) => normalized.includes(normalizeText(item)))) return 'lead';
+    if (student.some((item) => normalized.includes(normalizeText(item)))) return 'student';
+
+    if (/\b(aluno|estudante)\b/.test(normalized) && !normalized.includes('nao')) return 'student';
+    return 'unknown';
+}
+
+function detectStudentTopic(text) {
+    const normalized = normalizeText(text);
+    if (!normalized) return 'outro';
+    if (/(financeiro|boleto|mensalidade|pagamento|fatura)/.test(normalized)) return 'financeiro';
+    if (/(turma|classe)/.test(normalized)) return 'turmas';
+    if (/(aula|horario|agenda)/.test(normalized)) return 'aulas';
+    if (/(link|meet|zoom|google meet)/.test(normalized)) return 'link';
+    if (/(material|apostila|livro)/.test(normalized)) return 'material';
+    return 'outro';
+}
+
+function hasStudentSupportSignal(text) {
+    const topic = detectStudentTopic(text);
+    const cpf = extractCpf(text);
+    return {
+        topic,
+        cpf,
+        matches: Boolean(cpf) || topic !== 'outro'
+    };
+}
+
+async function sendBotReply(chatId, chatLimpo, text) {
+    const content = String(text || '').trim();
+    if (!chatId || !content) return null;
+
+    if (chatLimpo) registrarEnvioBot(chatLimpo, content);
+    registrarEnvioBot(chatId, content);
+
+    const sendResult = await sendMessage(chatId, content);
+    const sentMessageId =
+        sendResult?.key?.id ||
+        sendResult?.data?.key?.id ||
+        sendResult?.messageId ||
+        sendResult?.id ||
+        sendResult?.data?.messageId ||
+        sendResult?.data?.id;
+    registrarMensagemBotId(sentMessageId);
+    return sendResult;
+}
+
+
 app.post('/webhook', async (req, res) => {
     try {
         const body = req.body || {};
@@ -146,8 +293,96 @@ app.post('/webhook', async (req, res) => {
             }
         }
 
-        // Limpa o JID
-        const chatLimpo = rawJid.split('@')[0].replace(/\D/g, "");
+        const eventType = getEventType(body);
+        const eventUpper = String(eventType || "").toUpperCase();
+        if (eventUpper === "WEBHOOKSTATUS") {
+            const statusFromMe = truthyFlag(body.fromMe);
+            if (statusFromMe) {
+                const statusChatId = pickFirstId(
+                    body.chat?.id,
+                    body.chatId,
+                    body.key?.remoteJid,
+                    body.to,
+                    body.from,
+                    body.phone
+                );
+                const mappedPhone = resolveLidToPhone(statusChatId);
+                const statusMessageId = body.messageId || body.id || body.data?.messageId || body.data?.id;
+                const knownBot = isMensagemBotId(statusMessageId);
+                if (DEBUG_WEBHOOK) {
+                    console.log("🧾 STATUS META:", {
+                        statusMessageId,
+                        statusChatId,
+                        mappedPhone,
+                        knownBot,
+                        hasKnownBotIds: mensagensBotIds.size > 0
+                    });
+                }
+                if (statusMessageId && !knownBot) {
+                    const pauseTarget = mappedPhone || statusChatId;
+                    pauseChat(pauseTarget);
+                    const statusDigits = normalizeChatId(pauseTarget).digits;
+                    if (statusDigits) resetConversationState(statusDigits);
+                    console.log(`PAUSA AUTOMATICA (STATUS fromMe): ${statusDigits || pauseTarget}`);
+                }
+            }
+            return res.status(200).send('Status');
+        }
+
+        const senderRaw = pickFirstId(
+            data.key?.participant,
+            data.key?.remoteJid,
+            data.remoteJid,
+            data.participant,
+            data.sender?.id,
+            data.sender?.phone,
+            body.sender?.id,
+            body.sender?.phone,
+            body.sender,
+            body.author,
+            body.participant,
+            body.from,
+            body.key?.participant
+        );
+        const sender = toDigits(senderRaw);
+        const fromMe =
+            truthyFlag(body.fromMe) ||
+            truthyFlag(body.key?.fromMe) ||
+            truthyFlag(body.data?.fromMe) ||
+            truthyFlag(data.fromMe) ||
+            truthyFlag(data.key?.fromMe) ||
+            truthyFlag(body.sender?.fromMe) ||
+            truthyFlag(body.sender?.isMe) ||
+            truthyFlag(body.sender?.isOwner);
+        const adminMatch =
+            sender.includes(NUMERO_ADMIN) ||
+            toDigits(extractId(body.author)).includes(NUMERO_ADMIN) ||
+            toDigits(extractId(body.participant)).includes(NUMERO_ADMIN) ||
+            toDigits(extractId(body.key?.participant)).includes(NUMERO_ADMIN);
+
+        const chatIdDefault = pickFirstId(
+            data.key?.remoteJid,
+            data.remoteJid,
+            data.chatId,
+            body.chat?.id,
+            body.chatId,
+            body.phone,
+            body.from,
+            body.to,
+            body.key?.remoteJid
+        );
+        const chatId = (fromMe || adminMatch)
+            ? pickFirstId(
+                body.to,
+                body.phone,
+                data.key?.remoteJid,
+                body.chat?.id,
+                body.chatId,
+                body.key?.remoteJid,
+                body.from,
+                chatIdDefault
+            )
+            : chatIdDefault;
         const messageText = getMessageText(body);
 
         console.log(`🔎 Nova mensagem de: ${chatLimpo} | Texto: "${messageText}" | fromMe: ${fromMe}`);
@@ -181,8 +416,14 @@ app.post('/webhook', async (req, res) => {
                 if (alvo) {
                     const alvoLimpo = alvo.replace(/\D/g, "");
                     conversasPausadas.add(alvoLimpo); 
-                    console.log(`🛑 ADMIN PAUSOU O BOT PARA O NÚMERO: ${alvoLimpo}`);
-                    await sendMessage(chatLimpo, `🛑 Bot pausado para ${alvoLimpo}.`);
+                    conversasPausadas.add(alvoLimpo + "@c.us");
+                    conversasPausadas.add(alvoLimpo + "@s.whatsapp.net");
+                    
+                    // Limpa a memória da IA para quando voltar, voltar "zerado" ou manter, você decide.
+                    // resetConversationState(alvoLimpo); 
+                    
+                    console.log(`🛑 ADMIN PAUSOU: ${alvoLimpo}`);
+                    await sendBotReply(chatId, chatLimpo, `Bot pausado para ${alvoLimpo}.`);
                 }
                 return res.status(200).send('Admin');
             }
@@ -192,9 +433,14 @@ app.post('/webhook', async (req, res) => {
                 if (alvo) {
                     const alvoLimpo = alvo.replace(/\D/g, "");
                     conversasPausadas.delete(alvoLimpo);
-                    clearHistory(alvoLimpo); 
-                    console.log(`🟢 ADMIN REATIVOU O BOT PARA O NÚMERO: ${alvoLimpo}`);
-                    await sendMessage(chatLimpo, `🟢 Bot reativado para ${alvoLimpo}.`);
+                    conversasPausadas.delete(alvoLimpo + "@c.us");
+                    conversasPausadas.delete(alvoLimpo + "@s.whatsapp.net");
+                    
+                    // Limpa memória para começar conversa nova limpa
+                    resetConversationState(alvoLimpo); 
+
+                    console.log(`🟢 ADMIN REATIVOU: ${alvoLimpo}`);
+                    await sendBotReply(chatId, chatLimpo, `Bot reativado para ${alvoLimpo}.`);
                 }
                 return res.status(200).send('Admin');
             }
@@ -209,14 +455,125 @@ app.post('/webhook', async (req, res) => {
         // --- ZONA DA IA ---
         console.log(`✅ Cliente ${chatLimpo} diz: "${messageText}" -> Enviando para a IA...`);
 
+            if (!PAUSA_AUTOMATICA_ADMIN_ONLY || adminMatch) {
+                pauseChat(chatId);
+                resetConversationState(chatLimpo);
+                console.log(`PAUSA AUTOMATICA (ASSUMIDO): ${chatLimpo}`);
+                return res.status(200).send('Pausado (assumido)');
+            }
+        }
+
+        // --- ONBOARDING E ROTEAMENTO ALUNO / NAO ALUNO ---
+        let state = getConversationState(chatLimpo);
+
+        if (!adminMatch && state.stage === 'NEW') {
+            state.stage = 'AWAITING_PROFILE';
+            saveConversationState(chatLimpo, state);
+            await sendBotReply(
+                chatId,
+                chatLimpo,
+                [
+                    'Ola! Seja bem-vindo(a) a Active.',
+                    'Para eu te atender melhor, me diga:',
+                    '1) Seu nome',
+                    '2) Se voce ja e aluno(a) da escola (sim/nao)',
+                    '3) O que voce precisa hoje'
+                ].join('\n')
+            );
+            return res.status(200).send('Onboarding');
+        }
+
+        if (!adminMatch && state.stage === 'AWAITING_PROFILE') {
+            const studentStatus = detectStudentStatus(texto);
+            const studentSignal = hasStudentSupportSignal(texto);
+            const shouldRouteStudent = studentStatus === 'student' || studentSignal.matches;
+
+            if (shouldRouteStudent) {
+                state.stage = 'STUDENT_AWAITING_CPF';
+                state.isStudent = true;
+                saveConversationState(chatLimpo, state);
+            } else if (studentStatus === 'lead') {
+                state.stage = 'LEAD_READY';
+                state.isStudent = false;
+                saveConversationState(chatLimpo, state);
+            } else {
+                await sendBotReply(
+                    chatId,
+                    chatLimpo,
+                    'Para continuar, confirme se voce ja e aluno(a) da Active. Responda: "sou aluno" ou "nao sou aluno".'
+                );
+                return res.status(200).send('Perfil');
+            }
+        }
+
+        if (!adminMatch && state.stage === 'LEAD_READY') {
+            const studentStatus = detectStudentStatus(texto);
+            const studentSignal = hasStudentSupportSignal(texto);
+            if (studentStatus === 'student' || studentSignal.matches) {
+                state.stage = 'STUDENT_AWAITING_CPF';
+                state.isStudent = true;
+                saveConversationState(chatLimpo, state);
+            }
+        }
+
+        if (!adminMatch && (state.stage === 'STUDENT_AWAITING_CPF' || state.stage === 'STUDENT_READY')) {
+            let studentRequest = texto;
+
+            if (!state.cpf) {
+                const cpf = extractCpf(texto);
+                if (!cpf) {
+                    await sendBotReply(
+                        chatId,
+                        chatLimpo,
+                        'Preciso do CPF do aluno para continuar o atendimento. Envie os 11 digitos.'
+                    );
+                    return res.status(200).send('CPF pendente');
+                }
+
+                if (!isValidCPF(cpf)) {
+                    await sendBotReply(chatId, chatLimpo, 'CPF invalido. Verifique e envie novamente.');
+                    return res.status(200).send('CPF invalido');
+                }
+
+                state.cpf = cpf;
+                state.stage = 'STUDENT_READY';
+                saveConversationState(chatLimpo, state);
+
+                studentRequest = removeCpfFromText(texto);
+                if (!studentRequest) {
+                    await sendBotReply(
+                        chatId,
+                        chatLimpo,
+                        [
+                            'CPF confirmado com sucesso.',
+                            'Agora me diga o que voce precisa:',
+                            '- financeiro',
+                            '- turmas',
+                            '- aulas',
+                            '- link',
+                            '- material',
+                            '- ou outro assunto da Active'
+                        ].join('\n')
+                    );
+                    return res.status(200).send('CPF ok');
+                }
+            }
+
+            const topic = detectStudentTopic(studentRequest);
+            const supportResponse = await getStudentSupportResponse(studentRequest, chatLimpo, {
+                cpfConfirmado: true,
+                assunto: topic
+            });
+
+            await sendBotReply(chatId, chatLimpo, supportResponse);
+            return res.status(200).send('Aluno atendido');
+        }
+
+        // --- ZONA DA IA (NAO ALUNO / COMERCIAL) ---
+        console.log(`Cliente ${chatLimpo} disse: "${messageText}" -> IA comercial`);
         const aiResponse = await getGroqResponse(messageText, chatLimpo);
-        
-        console.log(`🧠 IA Respondeu: ${aiResponse}`);
-        registrarEnvioBot(chatLimpo, aiResponse);
-        
-        console.log(`🚀 Solicitando envio para a W-API com destino: ${chatLimpo}`);
-        const sendResult = await sendMessage([chatLimpo], aiResponse);
-        
+        await sendBotReply(chatId, chatLimpo, aiResponse);
+
         res.status(200).send('OK');
 
     } catch (error) {
@@ -229,3 +586,6 @@ app.listen(PORT, () => {
     console.log(`🚀 Servidor rodando na porta ${PORT}`);
     console.log(`🧠 Memória ativada para conversas contínuas.`);
 });
+
+
+
