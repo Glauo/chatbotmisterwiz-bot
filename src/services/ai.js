@@ -135,13 +135,13 @@ function clearHistory(userId) {
 async function getStudentSupportResponse(userMessage, userId, context = {}) {
     const text = String(userMessage || '').trim();
     if (!text) {
-        return 'Me diga qual demanda voce precisa resolver agora na Active.';
+        return 'Me diga a demanda que voce precisa na escola: financeiro, atendimento, coordenacao, turmas, aulas, links ou material.';
     }
 
     if (!MINHA_CHAVE_GROQ) {
         return [
             'CPF confirmado.',
-            'Posso ajudar com financeiro, turmas, aulas, links, material ou outra solicitacao da Active.'
+            'Posso ajudar com financeiro, atendimento, coordenacao, turmas, aulas, links, material e qualquer solicitacao da escola.'
         ].join(' ');
     }
 
@@ -168,7 +168,7 @@ async function getStudentSupportResponse(userMessage, userId, context = {}) {
                     content: [
                         'Voce e Wiz IA no atendimento de alunos da Active.',
                         'Sempre considere que o CPF ja foi confirmado.',
-                        'Atenda pedidos sobre financeiro, turmas, aulas, links, material e suporte escolar.',
+                        'Atenda pedidos sobre financeiro, atendimento, coordenacao, turmas, aulas, links, material e suporte escolar.',
                         'Se faltar dado para executar, peca de forma objetiva.',
                         'Seja curto e direto, sem discurso comercial.',
                         activeKnowledgeInstruction
