@@ -1,4 +1,5 @@
 const Groq = require('groq-sdk');
+const { getActiveKnowledgeSnippet } = require('./knowledge');
 
 // --- SUA CHAVE (use .env) ---
 const MINHA_CHAVE_GROQ = (process.env.GROQ_API_KEY || '').trim();
@@ -11,6 +12,17 @@ const groq = new Groq({ apiKey: MINHA_CHAVE_GROQ });
 // Memória da conversa
 const history = {};
 const studentHistory = {};
+
+function buildActiveKnowledgeInstruction({ audience, maxChars }) {
+    const snippet = getActiveKnowledgeSnippet(maxChars);
+    if (!snippet) return '';
+
+    return [
+        `Base de conhecimento Active para ${audience}:`,
+        snippet,
+        'Use esta base como referencia prioritaria quando a solicitacao estiver relacionada ao sistema Active.'
+    ].join('\n');
+}
 
 // ============================================================================
 // 🧠 CÉREBRO MISTER WIZ (Versão Alinhada: Valor, Retenção e Argumentos)
@@ -134,6 +146,11 @@ async function getStudentSupportResponse(userMessage, userId, context = {}) {
     }
 
     try {
+        const activeKnowledgeInstruction = buildActiveKnowledgeInstruction({
+            audience: 'atendimento de aluno',
+            maxChars: Number(process.env.ACTIVE_KNOWLEDGE_PROMPT_MAX_CHARS) || 2200
+        });
+
         if (!studentHistory[userId]) studentHistory[userId] = [];
         studentHistory[userId].push({ role: 'user', content: text });
 
@@ -153,7 +170,8 @@ async function getStudentSupportResponse(userMessage, userId, context = {}) {
                         'Sempre considere que o CPF ja foi confirmado.',
                         'Atenda pedidos sobre financeiro, turmas, aulas, links, material e suporte escolar.',
                         'Se faltar dado para executar, peca de forma objetiva.',
-                        'Seja curto e direto, sem discurso comercial.'
+                        'Seja curto e direto, sem discurso comercial.',
+                        activeKnowledgeInstruction
                     ].join(' ')
                 },
                 {

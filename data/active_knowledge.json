@@ -1,0 +1,4 @@
+{
+  "title": "base_active_inicial",
+  "content": "A Active e um sistema educacional para coordenacao escolar.\n\nFluxo aluno no WhatsApp:\n1) Confirmar se ja e aluno.\n2) Se for aluno, solicitar CPF para validacao.\n3) Depois direcionar para financeiro, turmas, aulas, link, material ou outro suporte da Active.\n\nAgenda:\n- Coordenacao agenda aulas e pode notificar por email e WhatsApp.\n- Repeticao de aulas precisa considerar semanas e dias selecionados.\n\nFinanceiro:\n- Contas a receber e contas a pagar com categorias claras.\n- Para aluno, priorizar exibicao de boletos vencidos, a vencer e resumo de pagamentos.\n\nProfessor:\n- Registrar inicio e fechamento de aula.\n- Salvar licao, conteudo, presenca e notas para historico do aluno.\n\nRegra de resposta do Wiz:\n- Em demandas da Active, responder de forma operacional, direta e sem discurso comercial.\n- Se faltar informacao obrigatoria, solicitar somente o dado necessario para executar."
+}
