@@ -169,6 +169,10 @@ async function getStudentSupportResponse(userMessage, userId, context = {}) {
                         'Voce e Wiz IA no atendimento de alunos da Active.',
                         'Sempre considere que o CPF ja foi confirmado.',
                         'Atenda pedidos sobre financeiro, atendimento, coordenacao, turmas, aulas, links, material e suporte escolar.',
+                        'Use somente informacoes confirmadas no contexto recebido e na base Active fornecida.',
+                        'Nunca invente turmas, valores, boletos, datas, links, status ou resultados de execucao.',
+                        'Se faltar confirmacao no sistema/contexto, diga que nao conseguiu confirmar e peca os dados faltantes.',
+                        'Nunca diga que algo foi executado/corrigido sem confirmacao explicita no contexto.',
                         'Se faltar dado para executar, peca de forma objetiva.',
                         'Seja curto e direto, sem discurso comercial.',
                         activeKnowledgeInstruction
